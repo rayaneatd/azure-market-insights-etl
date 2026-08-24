@@ -23,7 +23,7 @@ def run_full_pipeline():
 
     # Ensure log tables schema is applied before ingestion
     try:
-        ddl_path = os.path.join(os.path.dirname(__file__), "app/sql/log_schemas.sql")
+        ddl_path = os.path.join(os.path.dirname(__file__), "src\database\models\log_schemas.sql")
         execute_sql_from_file(database_pool, ddl_path)
     except Exception as e:
         log_to_discord(f"Critical error applying database migrations: {e}", level=AlertLevel.ERROR)
