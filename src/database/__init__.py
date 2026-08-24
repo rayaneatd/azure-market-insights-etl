@@ -44,3 +44,5 @@ from .fallback import (
     update_fallback_event_status,
     upsert_fallback_checkpoint
 )
+
+from .analytics import ingest_batches_to_postgres

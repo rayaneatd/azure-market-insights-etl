@@ -30,12 +30,16 @@ from src.igdb.rate_limit import TokenBucket
 from src.tables_schema import BaseIGDBSchema, BASE_IGDB_URL
 from src.utils.alerting import AlertLevel, log_to_discord
 from src.utils.types import ChangedColumns, TypeChange
-# IGDB API rate limit: 4 requests per second.
-bucket = TokenBucket(capacity=4, fill_rate=4)
+
+# ================================================================
+# 0. CONFIG & CONSTANTS
+# ================================================================
+
+bucket = TokenBucket(capacity=4, fill_rate=4) # 4 req/s
 
 
 # ================================================================
-# Checkpoint and table configuration
+# 1. CHECKPOINT / FALLBACK
 # ================================================================
 
 def _construct_tables_dict(db_pool: ConnectionPool) -> dict[type, dict]:
@@ -102,31 +106,9 @@ def _construct_tables_dict(db_pool: ConnectionPool) -> dict[type, dict]:
     return resolved
 
 
-def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient, Model: type, batch: list[dict], cursor: int, offset: int) -> None:
-    """
-    Persists a raw page of records to the bronze/raw zone in ADLS.
-    Path pattern keeps pages uniquely addressable and roughly time-ordered.
-    """
-    path = f"{Model._endpoint}/{cursor}_{offset}.json"
-    write_into_raw(
-        azure_client,
-        Containers.Data.value,
-        path,
-        json.dumps(batch).encode()
-    )
-
-
 # ================================================================
-# Ingestion pipeline
+# 2. SCHEMA DRIFT 
 # ================================================================
-
-    # postgres pipeline
-def ingest_batches_to_postgres(azure_client: DataLakeServiceClient | BlobServiceClient) -> None:
-    """
-    PLACEHOLDER — future implementation.
-    Reads newly landed raw/bronze batches from ADLS and loads them into Postgres.
-    """
-    pass
 
 
 def get_schema_diff(
@@ -163,6 +145,20 @@ def detect_and_log_schema_change(
     recent_schema_hash: str | None,
     current_schema_hash: str
 ):
+    """Compare the current table schema against the last logged one and
+    record any drift.
+ 
+    No-op if the schema hash hasn't changed. Never raises: failures here are
+    reported to Discord and swallowed, since schema logging must not block
+    ingestion.
+ 
+    Args:
+        db_pool: Postgres connection pool.
+        Model: Schema class of the table being checked.
+        run_id: ID of the current ingestion run (for audit logging).
+        recent_schema_hash: Hash last recorded for this table, or None.
+        current_schema_hash: Hash of the table's current schema definition.
+    """
     # schema change detection
     try:
         
@@ -186,6 +182,27 @@ def detect_and_log_schema_change(
             AlertLevel.ERROR
         )
 
+
+# ================================================================
+# 3. RAW PERSISTENCE + CORE INGESTION
+# ================================================================
+
+
+def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient, Model: type, batch: list[dict], cursor: int, offset: int) -> None:
+    """
+    Persists a raw page of records to the bronze/raw zone in ADLS.
+    Path pattern keeps pages uniquely addressable and roughly time-ordered.
+    """
+    path = f"{Model._endpoint}/{cursor}_{offset}.json"
+    write_into_raw(
+        azure_client,
+        Containers.Data.value,
+        path,
+        json.dumps(batch).encode()
+    )
+
+
+
 def _ingest_tables(
     db_pool: ConnectionPool,
     azure_client,
@@ -193,6 +210,19 @@ def _ingest_tables(
     meta,
     run_id
 ):
+    """
+    Ingest a single IGDB table with resume + fallback support.
+
+    Args:
+        meta: dict with cursor, offset, last_id, end_watermark, is_fallback_event
+    Returns:
+        True if success, False if failed (logs to discord)
+
+    Logic:
+        - paginates by 500, resets offset to 0 + cursor=max_seen at 10000
+        - updates checkpoints only if not fallback
+        - closes fallback event when max_seen >= end_watermark or batch < 500
+    """
 
     cursor = meta["cursor"]
     end_watermark = meta["end_watermark"]
@@ -351,9 +381,10 @@ def _ingest_tables(
         log_to_discord(msg=f"```\n{msg}\n```", level=AlertLevel.WARNING)
         
 
+# ================================================================
+# 4. MAIN ORCHESTRATOR
+# ================================================================
 
-
-    # main pipeline
 def do_ingestion(azure_client: DataLakeServiceClient | BlobServiceClient, db_pool: ConnectionPool) -> None:
     """
     Main ingestion pipeline. Processes pending fallback events or continuous incremental watermarks,
