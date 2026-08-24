@@ -16,7 +16,6 @@ from src.datalake.functions import (
     Containers
 )
 from src.database import (
-    start_ingestion_run,
     complete_ingestion_run,
     get_checkpoints,
     upsert_checkpoint,
