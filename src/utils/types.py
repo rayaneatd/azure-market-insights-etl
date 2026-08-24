@@ -1,7 +1,26 @@
+import datetime
 import msgspec
+import polars as pl
+
 
 # ================================================================
-# Type definitions for schema change detection
+# 1. TYPE MAPPING
+# ================================================================
+
+PY_TO_PL = {
+    int: pl.Int64,
+    str: pl.Utf8,
+    float: pl.Float64,
+    bool: pl.Boolean,
+    datetime.datetime: pl.Datetime("ms"),
+    datetime.date: pl.Date,
+    bytes: pl.Binary,
+}
+
+PY_TO_PL_STR = {k: str(v) for k, v in PY_TO_PL.items()} #TODO: on test ça après
+
+# ================================================================
+# 2. TYPE DEFINITIONS - for schema change detection
 # ================================================================
 
 class TypeChange(msgspec.Struct):

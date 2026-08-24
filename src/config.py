@@ -12,7 +12,7 @@ IS_PROD = PROJECT_ENVIRONMENT in ("PROD", "PRODUCTION")
 IS_TEST = PROJECT_ENVIRONMENT == "TEST"
 
 # ==================================================================
-# *********** CREDENTIALS ******************************************
+# 0. CREDENTIALS 
 # ==================================================================
 
     # azure storage credentials
@@ -41,7 +41,7 @@ PROD_POSTGRES_PORT                = str(os.getenv("PROD_POSTGRES_PORT"))
 PROD_POSTGRES_DB                  = str(os.getenv("PROD_POSTGRES_DB"))
 
 # ==================================================================
-# *********** EXCEPTIONS *******************************************
+# 1. EXCEPTIONS 
 # ==================================================================
 
 class InvalidStorageAccountURL(Exception):

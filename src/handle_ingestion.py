@@ -10,7 +10,7 @@ from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
 from psycopg_pool import ConnectionPool
 
-# 3. local - src. partout, pas un coup src. un coup utils.
+# 3. local 
 from src.database import (
     complete_ingestion_run,
     get_checkpoints,
@@ -27,7 +27,7 @@ from src.database import (
 from src.datalake.functions import Containers, write_into_raw
 from src.igdb.client import extract_igdb_data
 from src.igdb.rate_limit import TokenBucket
-from src.tables_schema import BaseIGDBSchema, BASE_IGDB_URL
+from src.igdb.models import BaseIGDBSchema, BASE_IGDB_URL
 from src.utils.alerting import AlertLevel, log_to_discord
 from src.utils.types import ChangedColumns, TypeChange
 
@@ -247,7 +247,6 @@ def _ingest_tables(
             bucket.acquire()
             query = Model.build_query(
                 last_update_value=cursor,
-                last_id=last_id,
                 offset=offset
             )
             
