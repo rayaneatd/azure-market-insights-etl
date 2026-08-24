@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS logs.schema_history (
     table_name VARCHAR(100) NOT NULL,
     schema_hash VARCHAR(100) NOT NULL,
     columns_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
-    changed_columns TEXT [],
+    changed_columns JSONB NOT NULL DEFAULT '[]'::jsonb,
+    --! j'ai changé le type btw
     detected_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     detected_in_run_id UUID REFERENCES logs.ingestion_runs(run_id),
     included_at TIMESTAMPTZ,

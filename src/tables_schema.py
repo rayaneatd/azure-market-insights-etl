@@ -1,12 +1,33 @@
+from patito._pydantic import column_info
 import patito as pt
-from typing import ClassVar
+import msgspec
+from typing import (
+    ClassVar, 
+    Literal,
+    Union,
+    get_args,
+    get_origin
+)
 from hashlib import sha256
+import polars as pl
+import datetime
 
 # we can modify the version of the API by changing this variable
 #! NEVER PUT A SLASH AT THE END OF THE URL
 BASE_IGDB_URL = "https://api.igdb.com/v4"
 STARTING_TIMESTAMP_IGDB_TABLES = 1577836800  # by default we start in the year 2020
 
+PY_TO_PL = {
+    int: pl.Int64,
+    str: pl.Utf8,
+    float: pl.Float64,
+    bool: pl.Boolean,
+    datetime.datetime: pl.Datetime("ms"),
+    datetime.date: pl.Date,
+    bytes: pl.Binary,
+}
+
+PY_TO_PL_STR = {k: str(v) for k, v in PY_TO_PL.items()}
 
 class BaseIGDBSchema(pt.Model):
     """
@@ -34,7 +55,21 @@ class BaseIGDBSchema(pt.Model):
         "populate_by_name": True # allows instantiation by field name even if alias is set
     }
 
-    @classmethod
+    def _clean(t):
+        # Unwrap Optional / Union
+        origin = get_origin(t)
+        if origin is Union or origin is list or str(origin).startswith("Union"):
+            args = [a for a in get_args(t) if a is not type(None)]
+            if args:
+                t = args[0]
+
+        if get_origin(t) is list:
+            inner = get_args(t)[0]
+            return f"List({PY_TO_PL_STR.get(inner, str(inner))})"
+
+        return PY_TO_PL_STR.get(t, getattr(t, '__name__', str(t))) # pyrefly: ignore[no-matching-overload]
+
+    @classmethod # get fields
     def apicalypse_fields(cls) -> str:
         """
         Generates a comma-separated string of all declared fields for the IGDB
@@ -45,7 +80,7 @@ class BaseIGDBSchema(pt.Model):
             for name, info in cls.model_fields.items()
         )
 
-    @classmethod
+    @classmethod # build query
     def build_query(
         cls,
         last_update_value: int = 0,
@@ -87,7 +122,7 @@ class BaseIGDBSchema(pt.Model):
 
         return " ".join(query_parts)
 
-    @classmethod
+    @classmethod # get hash signature
     def get_signature(cls) -> str:
         """
         Generates a signature of the table schema.
@@ -96,6 +131,25 @@ class BaseIGDBSchema(pt.Model):
             info.alias or name
             for name, info in cls.model_fields.items()
         ).encode()).hexdigest()
+
+    @classmethod # get columns snapshot
+    def get_columns_snapshot(cls, 
+                             format: Literal['json', 'dict', 'list']
+    ) -> str | dict | list:
+        """
+        Returns a JSON string representation of the table schema (field names and types).
+        """
+        columns_snapshot = {
+            name: cls._clean(info.annotation) # pyrefly: ignore
+            for name, info in cls.model_fields.items()
+        }
+
+        if format == 'json':
+            return msgspec.json.encode(columns_snapshot).decode('utf-8')
+        elif format == 'dict':
+            return columns_snapshot
+        elif format == 'list':
+            return [name for name, field in cls.model_fields.items()]
 
 # 1. Endpoint: /games
 class GameSchema(BaseIGDBSchema):

@@ -1,3 +1,9 @@
+"""
+Utility functions for logging messages to Discord.
+
+Include AlertLevel enum and log_to_discord function.
+"""
+
 import requests
 from enum import Enum
 

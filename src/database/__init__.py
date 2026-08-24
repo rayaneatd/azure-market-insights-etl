@@ -1,3 +1,23 @@
+"""
+Database module for the Azure Market Insights ELT pipeline.
+
+This module provides functions for interacting with the database, including:
+- Initializing the database engine
+- Executing SQL queries
+- Reading from the database
+- Updating the database
+- Logging ingestion runs
+- Logging batch executions
+- Logging schema changes
+- Getting checkpoints
+- Upserting checkpoints
+- Getting recent schema hashes
+- Getting recent columns snapshots
+- Getting pending fallback events
+- Updating fallback event status
+- Upserting fallback checkpoints
+"""
+
 
 from .auth import init_database_engine
 
@@ -14,7 +34,9 @@ from .logs import (
     log_batch,
     log_schema_change,
     get_checkpoints,
-    upsert_checkpoint
+    upsert_checkpoint,
+    get_recent_schema_hash,
+    get_recent_columns_snapshot
 )
 
 from .fallback import (

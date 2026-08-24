@@ -1,7 +1,7 @@
 from azure.storage.filedatalake import DataLakeServiceClient
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import ResourceNotFoundError
-from src.utils.log_messages import log_to_discord, AlertLevel
+from src.utils.alerting import log_to_discord, AlertLevel
 
 from enum import Enum
 

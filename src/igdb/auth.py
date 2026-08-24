@@ -1,6 +1,6 @@
 import httpx
 from datetime import datetime, timedelta
-from ..secrets.project_credentials import (
+from src.config import (
     TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
 )
 

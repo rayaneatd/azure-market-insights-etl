@@ -3,6 +3,14 @@ import os
 
 load_dotenv()
 
+    # env project
+PROJECT_ENVIRONMENT = str(os.getenv("ENVIRONMENT")).upper()
+
+    # Helpers
+IS_DEV  = PROJECT_ENVIRONMENT == "DEV"
+IS_PROD = PROJECT_ENVIRONMENT in ("PROD", "PRODUCTION")
+IS_TEST = PROJECT_ENVIRONMENT == "TEST"
+
 # ==================================================================
 # *********** CREDENTIALS ******************************************
 # ==================================================================
@@ -40,3 +48,10 @@ class InvalidStorageAccountURL(Exception):
     " Please check the storage account URL "
     pass
 
+
+    # Exception 
+class UnknownEnvironment(Exception):
+    """
+    Invalid project environment. Please check the 'ENVIRONMENT' variable in case someone made a typo.
+    """
+    pass

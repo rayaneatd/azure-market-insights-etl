@@ -1,5 +1,5 @@
 from psycopg_pool import ConnectionPool 
-from src.secrets.project_credentials import (
+from src.config import (
     # dev postgres credentials
     DEV_POSTGRES_USER, 
     DEV_POSTGRES_PASSWORD,
@@ -11,15 +11,14 @@ from src.secrets.project_credentials import (
     PROD_POSTGRES_PASSWORD,
     PROD_POSTGRES_HOST,
     PROD_POSTGRES_PORT,
-    PROD_POSTGRES_DB
-)
+    PROD_POSTGRES_DB,
 
-from src.secrets.project_environment import (
+    # project env helpers
     IS_DEV,
     IS_PROD
 )
 
-from src.utils.log_messages import log_to_discord, AlertLevel
+from src.utils.alerting import log_to_discord, AlertLevel
 
 
 # initialize database engine

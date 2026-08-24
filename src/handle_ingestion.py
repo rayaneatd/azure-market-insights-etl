@@ -1,33 +1,42 @@
-# pyrefly: ignore [missing-import]
+# 1. stdlib
 import json
+import time
 import traceback
 import uuid
-import time
-from typing import Literal
-from psycopg_pool import ConnectionPool
-from src.igdb.client import extract_igdb_data
-from src.igdb.rate_limit import TokenBucket
-from src.tables_schema import *
-from src.utils.log_messages import AlertLevel, log_to_discord
-from azure.storage.filedatalake import DataLakeServiceClient
+from typing import Any, Literal
+
+# 2. third party
 from azure.storage.blob import BlobServiceClient
-from src.datalake.functions import (
-    write_into_raw,
-    Containers
-)
+from azure.storage.filedatalake import DataLakeServiceClient
+from psycopg_pool import ConnectionPool
+
+# 3. local - src. partout, pas un coup src. un coup utils.
 from src.database import (
     complete_ingestion_run,
     get_checkpoints,
+    get_pending_fallback_events,
+    get_recent_columns_snapshot,
+    get_recent_schema_hash,
+    log_batch,
+    log_schema_change,
+    start_ingestion_run,
+    update_fallback_event_status,
     upsert_checkpoint,
     upsert_fallback_checkpoint,
-    log_batch,
-    get_pending_fallback_events,
-    update_fallback_event_status
 )
-
+from src.datalake.functions import Containers, write_into_raw
+from src.igdb.client import extract_igdb_data
+from src.igdb.rate_limit import TokenBucket
+from src.tables_schema import BaseIGDBSchema, BASE_IGDB_URL
+from src.utils.alerting import AlertLevel, log_to_discord
+from src.utils.types import ChangedColumns, TypeChange
 # IGDB API rate limit: 4 requests per second.
 bucket = TokenBucket(capacity=4, fill_rate=4)
 
+
+# ================================================================
+# Checkpoint and table configuration
+# ================================================================
 
 def _construct_tables_dict(db_pool: ConnectionPool) -> dict[type, dict]:
     """
@@ -107,6 +116,11 @@ def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient, Mod
     )
 
 
+# ================================================================
+# Ingestion pipeline
+# ================================================================
+
+    # postgres pipeline
 def ingest_batches_to_postgres(azure_client: DataLakeServiceClient | BlobServiceClient) -> None:
     """
     PLACEHOLDER — future implementation.
@@ -115,6 +129,231 @@ def ingest_batches_to_postgres(azure_client: DataLakeServiceClient | BlobService
     pass
 
 
+def get_schema_diff(
+    logged_columns: dict[str, str],
+    current_columns: dict[str, str]
+) -> ChangedColumns:
+        # first run
+    if not logged_columns:
+        return ChangedColumns(
+            added=list(current_columns.keys()),
+            removed=[],
+            type_changed={}
+        )
+
+        # else
+    return ChangedColumns(
+            #? the fields we added
+        added=list(current_columns.keys() - logged_columns.keys()),
+            #? the fields we removed
+        removed=list(logged_columns.keys() - current_columns.keys()),
+            #? if data types are changed
+        type_changed={
+            col: TypeChange(old=logged_columns[col], new=current_columns[col])
+            for col in logged_columns.keys() & current_columns.keys()
+            if logged_columns[col] != current_columns[col]
+    }
+    )             
+
+
+def detect_and_log_schema_change(
+    db_pool: ConnectionPool,
+    Model: Any,
+    run_id: str,
+    recent_schema_hash: str | None,
+    current_schema_hash: str
+):
+    # schema change detection
+    try:
+        
+        if recent_schema_hash != current_schema_hash:
+            # we're going to compare the present with the past schema
+            logged_columns: dict[str, str] = get_recent_columns_snapshot(db_pool, Model.__name__)
+            current_columns: dict[str, str] = Model.get_columns_snapshot(format='dict')
+            current_changed = get_schema_diff(logged_columns, current_columns)
+            
+            log_schema_change(
+                db_pool,
+                Model.__name__,
+                current_schema_hash,
+                current_columns,
+                current_changed,
+                run_id
+            )  
+    except Exception as schema_err:
+        log_to_discord(
+            f"Schema change detection failed for table {Model.__name__}: {schema_err}",
+            AlertLevel.ERROR
+        )
+
+def _ingest_tables(
+    db_pool: ConnectionPool,
+    azure_client,
+    Model: Any,
+    meta,
+    run_id
+):
+
+    cursor = meta["cursor"]
+    end_watermark = meta["end_watermark"]
+    last_id = meta["last_id"]
+    offset = meta["offset"]
+    is_fallback_event = meta["is_fallback_event"]
+    event_id = meta["event_id"]
+    max_seen = cursor
+    event_records_count = 0
+
+    detect_and_log_schema_change(
+        db_pool=db_pool,
+        Model=Model,
+        run_id=run_id,
+        recent_schema_hash=get_recent_schema_hash(db_pool, Model.__name__),
+        current_schema_hash=Model.get_signature()
+    )
+
+    # batch processing
+    try:
+        while True:
+            bucket.acquire()
+            query = Model.build_query(
+                last_update_value=cursor,
+                last_id=last_id,
+                offset=offset
+            )
+            
+            #* logging
+            print(f"QUERY [{Model.__name__}]: {query!r}", flush=True)
+            start_time = time.perf_counter()
+            batch = []
+            batch_status = "SUCCESS"
+            batch_err = None
+            try:
+                batch = extract_igdb_data(
+                    url=f"{BASE_IGDB_URL}{Model._endpoint}",
+                    query=query,
+                    timeout=10
+                )
+            except Exception as extract_err:
+                batch_status = "FAILED"
+                batch_err = str(extract_err)
+                if is_fallback_event and event_id:
+                    update_fallback_event_status(
+                        db_pool,
+                        event_id,
+                        status="FAILED",
+                        error_message=batch_err
+                    )
+                raise
+            finally:
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                log_batch(
+                    pool=db_pool,
+                    run_id=run_id,
+                    table_name=Model.__name__,
+                    layer="RAW",
+                    status=batch_status,
+                    cursor_value=cursor,
+                    offset_value=offset,
+                    records_count=len(batch) if batch else 0,
+                    duration_ms=elapsed_ms,
+                    query_sent=query,
+                    error_message=batch_err
+                )
+            if not batch:
+                if is_fallback_event and event_id:
+                    update_fallback_event_status(
+                        db_pool,
+                        event_id,
+                        status="COMPLETED",
+                        records_processed=event_records_count
+                    )
+                else:
+                    # Standard incremental completion update
+                    upsert_checkpoint(
+                        pool=db_pool,
+                        table_name=Model.__name__,
+                        current_watermark=max_seen,
+                        last_id=last_id,
+                        layer="RAW",
+                        offset_val=0,
+                        run_id=run_id
+                    )
+                    upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
+                break
+            # Validate records
+            for record in batch:
+                if "updated_at" not in record or "id" not in record:
+                    raise ValueError(
+                        f"Record missing 'updated_at' or 'id' for {Model.__name__}: {record}"
+                    )
+            # Persist raw page to ADLS Raw zone
+            _save_raw_batch(azure_client, Model, batch, cursor, offset)
+            event_records_count += len(batch)
+            batch_max_ts = max(r["updated_at"] for r in batch)
+            batch_max_id_for_ts = max(r["id"] for r in batch if r["updated_at"] == batch_max_ts)
+            if batch_max_ts > max_seen:
+                max_seen = batch_max_ts
+                last_id = batch_max_id_for_ts
+            else:
+                last_id = max(last_id, batch_max_id_for_ts)
+            # Check if reached specified end_watermark for fallback event
+            if is_fallback_event and end_watermark and max_seen >= end_watermark:
+                update_fallback_event_status(
+                    db_pool,
+                    event_id,
+                    status="COMPLETED",
+                    records_processed=event_records_count
+                )
+                break
+            if len(batch) < 500:
+                if is_fallback_event and event_id:
+                    update_fallback_event_status(
+                        db_pool,
+                        event_id,
+                        status="COMPLETED",
+                        records_processed=event_records_count
+                    )
+                else:
+                    upsert_checkpoint(
+                        pool=db_pool,
+                        table_name=Model.__name__,
+                        current_watermark=max_seen,
+                        last_id=last_id,
+                        layer="RAW",
+                        offset_val=0,
+                        run_id=run_id
+                    )
+                    upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
+                break
+            # Compute next resume state for progressive pagination
+            next_offset = offset + 500
+            next_cursor = max_seen if next_offset >= 10000 else cursor
+            if next_offset >= 10000:
+                next_offset = 0
+            if not is_fallback_event:
+                upsert_checkpoint(
+                    pool=db_pool,
+                    table_name=Model.__name__,
+                    current_watermark=next_cursor,
+                    last_id=last_id,
+                    layer="RAW",
+                    offset_val=next_offset,
+                    run_id=run_id
+                )
+            offset = next_offset
+            cursor = next_cursor
+    except Exception as e:
+        tb = traceback.format_exc()
+        msg = f"Unexpected failure ingesting {Model.__name__}: {e}\n{tb}"
+        max_len = 1900
+        if len(msg) > max_len:
+            msg = msg[:200] + "\n...\n" + msg[-(max_len - 200):]
+        log_to_discord(msg=f"```\n{msg}\n```", level=AlertLevel.WARNING)
+        
+
+
+
+    # main pipeline
 def do_ingestion(azure_client: DataLakeServiceClient | BlobServiceClient, db_pool: ConnectionPool) -> None:
     """
     Main ingestion pipeline. Processes pending fallback events or continuous incremental watermarks,
@@ -130,169 +369,15 @@ def do_ingestion(azure_client: DataLakeServiceClient | BlobServiceClient, db_poo
         tables = _construct_tables_dict(db_pool)
 
         for Model, meta in tables.items():
-            cursor = meta["cursor"]
-            end_watermark = meta["end_watermark"]
-            last_id = meta["last_id"]
-            offset = meta["offset"]
-            is_fallback_event = meta["is_fallback_event"]
-            event_id = meta["event_id"]
-            max_seen = cursor
-            event_records_count = 0
+            _ingest_tables(
+                db_pool=db_pool,
+                azure_client=azure_client,
+                Model=Model,
+                meta=meta,
+                run_id=run_id
+            )
 
-            try:
-                while True:
-                    bucket.acquire()
-
-                    query = Model.build_query(
-                        last_update_value=cursor,
-                        last_id=last_id,
-                        offset=offset
-                    )
-                    
-                    #* logging
-                    print(f"QUERY [{Model.__name__}]: {query!r}", flush=True)
-
-                    start_time = time.perf_counter()
-                    batch = []
-                    batch_status = "SUCCESS"
-                    batch_err = None
-
-                    try:
-                        batch = extract_igdb_data(
-                            url=f"{BASE_IGDB_URL}{Model._endpoint}",
-                            query=query,
-                            timeout=10
-                        )
-                    except Exception as extract_err:
-                        batch_status = "FAILED"
-                        batch_err = str(extract_err)
-                        if is_fallback_event and event_id:
-                            update_fallback_event_status(
-                                db_pool,
-                                event_id,
-                                status="FAILED",
-                                error_message=batch_err
-                            )
-                        raise
-                    finally:
-                        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-                        log_batch(
-                            pool=db_pool,
-                            run_id=run_id,
-                            table_name=Model.__name__,
-                            layer="RAW",
-                            status=batch_status,
-                            cursor_value=cursor,
-                            offset_value=offset,
-                            records_count=len(batch) if batch else 0,
-                            duration_ms=elapsed_ms,
-                            query_sent=query,
-                            error_message=batch_err
-                        )
-
-                    if not batch:
-                        if is_fallback_event and event_id:
-                            update_fallback_event_status(
-                                db_pool,
-                                event_id,
-                                status="COMPLETED",
-                                records_processed=event_records_count
-                            )
-                        else:
-                            # Standard incremental completion update
-                            upsert_checkpoint(
-                                pool=db_pool,
-                                table_name=Model.__name__,
-                                current_watermark=max_seen,
-                                last_id=last_id,
-                                layer="RAW",
-                                offset_val=0,
-                                run_id=run_id
-                            )
-                            upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
-                        break
-
-                    # Validate records
-                    for record in batch:
-                        if "updated_at" not in record or "id" not in record:
-                            raise ValueError(
-                                f"Record missing 'updated_at' or 'id' for {Model.__name__}: {record}"
-                            )
-
-                    # Persist raw page to ADLS Raw zone
-                    _save_raw_batch(azure_client, Model, batch, cursor, offset)
-                    event_records_count += len(batch)
-
-                    batch_max_ts = max(r["updated_at"] for r in batch)
-                    batch_max_id_for_ts = max(r["id"] for r in batch if r["updated_at"] == batch_max_ts)
-
-                    if batch_max_ts > max_seen:
-                        max_seen = batch_max_ts
-                        last_id = batch_max_id_for_ts
-                    else:
-                        last_id = max(last_id, batch_max_id_for_ts)
-
-                    # Check if reached specified end_watermark for fallback event
-                    if is_fallback_event and end_watermark and max_seen >= end_watermark:
-                        update_fallback_event_status(
-                            db_pool,
-                            event_id,
-                            status="COMPLETED",
-                            records_processed=event_records_count
-                        )
-                        break
-
-                    if len(batch) < 500:
-                        if is_fallback_event and event_id:
-                            update_fallback_event_status(
-                                db_pool,
-                                event_id,
-                                status="COMPLETED",
-                                records_processed=event_records_count
-                            )
-                        else:
-                            upsert_checkpoint(
-                                pool=db_pool,
-                                table_name=Model.__name__,
-                                current_watermark=max_seen,
-                                last_id=last_id,
-                                layer="RAW",
-                                offset_val=0,
-                                run_id=run_id
-                            )
-                            upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
-                        break
-
-                    # Compute next resume state for progressive pagination
-                    next_offset = offset + 500
-                    next_cursor = max_seen if next_offset >= 10000 else cursor
-                    if next_offset >= 10000:
-                        next_offset = 0
-
-                    if not is_fallback_event:
-                        upsert_checkpoint(
-                            pool=db_pool,
-                            table_name=Model.__name__,
-                            current_watermark=next_cursor,
-                            last_id=last_id,
-                            layer="RAW",
-                            offset_val=next_offset,
-                            run_id=run_id
-                        )
-
-                    offset = next_offset
-                    cursor = next_cursor
-
-            except Exception as e:
-                run_status = "FAILED"
-                tb = traceback.format_exc()
-                msg = f"Unexpected failure ingesting {Model.__name__}: {e}\n{tb}"
-                max_len = 1900
-                if len(msg) > max_len:
-                    msg = msg[:200] + "\n...\n" + msg[-(max_len - 200):]
-                log_to_discord(msg=f"```\n{msg}\n```", level=AlertLevel.WARNING)
-                continue
-
+    # exception
     except Exception as e:
         run_status = "FAILED"
         run_error = str(e)

@@ -1,9 +1,14 @@
+import msgspec
+
 from psycopg_pool import ConnectionPool
 from psycopg.rows import namedtuple_row
 from typing import Literal
 
 from .core import _execute
-
+from src.utils.types import ChangedColumns, TypeChange
+from src.utils.alerting import (
+    log_to_discord, AlertLevel
+)
 
 # ================================================================
 # Ingestion
@@ -100,27 +105,88 @@ def log_batch(
 def log_schema_change(
     pool: ConnectionPool,
     table_name: str,
-    column_name: str,
-    data_type: str,
+    schema_hash: str,
+    columns_snapshot: dict[str, str],
+    changed_columns: ChangedColumns,
     run_id: str,
     status: str = "NEW_COLUMN",
     action_taken: str | None = None
 ) -> None:
     """Logs schema changes or drifts found during parsing."""
     query = """
-        INSERT INTO logs.schema_history (table_name, column_name, data_type, detected_in_run_id, status, action_taken)
-        VALUES (%(table_name)s, %(column_name)s, %(data_type)s, %(run_id)s, %(status)s, %(action_taken)s)
+        INSERT INTO logs.schema_history (table_name, schema_hash, columns_snapshot, changed_columns, detected_in_run_id, status, action_taken)
+        VALUES (%(table_name)s, %(schema_hash)s, %(columns_snapshot)s, %(changed_columns)s, %(run_id)s, %(status)s, %(action_taken)s)
         ON CONFLICT DO NOTHING;
     """
     _execute(pool, query, {
         "table_name": table_name,
-        "column_name": column_name,
-        "data_type": data_type,
+        "schema_hash": schema_hash,
+        "columns_snapshot": msgspec.json.encode(columns_snapshot), # besoin d'encoder ça en JSON ?
+        "changed_columns": msgspec.json.encode(changed_columns),
         "run_id": run_id,
         "status": status,
         "action_taken": action_taken
     })
 
+def get_recent_schema_hash(pool: ConnectionPool, 
+                           table_name: str
+) -> str | None:
+    """Retrieves the most recent schema hash for a table."""
+    query = """
+        SELECT schema_hash
+        FROM logs.schema_history
+        WHERE table_name = %(table_name)s
+        ORDER BY detected_at DESC
+        LIMIT 1;
+    """
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=namedtuple_row) as cur:
+            cur.execute(query, {"table_name": table_name})
+            row = cur.fetchone()
+            if row:
+                return row.schema_hash # pyrefly: ignore
+            return None
+
+def get_recent_columns_snapshot(
+    pool: ConnectionPool,
+    table_name: str
+) -> dict[str, str]:
+    """
+    Retrieves the most recent columns snapshot for a table.
+    
+    Args:
+        pool: The database connection pool.
+        table_name: The name of the table.
+    """
+    
+    query = """
+        SELECT columns_snapshot
+        FROM logs.schema_history
+        WHERE table_name = %(table_name)s
+        ORDER BY detected_at DESC
+        LIMIT 1;
+    """
+
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=namedtuple_row) as cur:
+            cur.execute(query, {"table_name": table_name})
+            row = cur.fetchone()
+            if not row or not row.columns_snapshot: # pyrefly: ignore
+                return {}
+
+            raw = row.columns_snapshot
+            if isinstance(raw, dict):
+                return raw
+            
+            try:
+                return msgspec.json.decode(raw, type=dict[str, str]) # pyrefly: ignore
+            except Exception:
+                log_to_discord(
+                    f"Failed to decode columns snapshot for table {table_name}",
+                    AlertLevel.WARNING
+                )
+                return {}
+    
 
 # ================================================================
 # Checkpoints

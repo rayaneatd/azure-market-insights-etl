@@ -3,14 +3,14 @@ from azure.identity             import DefaultAzureCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 from azure.storage.blob         import BlobServiceClient
 
-from src.secrets                   import (
+from src.config import (
     UnknownEnvironment, # exception
 
     IS_DEV, IS_PROD, IS_TEST, # helpers
 
     dev_STORAGE_CONNECTION_STRING, prod_STORAGE_ACCOUNT_URL # credentials
 )
-from src.utils.log_messages        import (
+from src.utils.alerting        import (
     AlertLevel, log_to_discord
 )
 
