@@ -153,16 +153,6 @@ class BaseIGDBSchema(pt.Model):
             query_parts.append(f"offset {offset};")
 
         return " ".join(query_parts)
-        # get hash signature
-    @classmethod 
-    def get_signature(cls) -> str:
-        """
-        Generates a signature of the table schema.
-        """
-        return sha256(" ".join(
-            info.alias or name
-            for name, info in cls.model_fields.items()
-        ).encode()).hexdigest()
         # get columns snapshot
     @classmethod 
     def get_columns_snapshot(cls, 
@@ -182,3 +172,16 @@ class BaseIGDBSchema(pt.Model):
             return columns_snapshot
         elif format == 'list':
             return [name for name, field in cls.model_fields.items()]
+        # get hash signature
+    @classmethod 
+    def get_signature(cls) -> str:
+        """
+        Generates a signature of the table schema.
+        """
+        raw_schema = {
+            name: info.annotation
+            for name, info in cls.model_fields.items()
+        }
+        
+
+        return sha256(" ".join(raw_schema).encode()).hexdigest()
