@@ -1,4 +1,5 @@
 # 1. stdlib
+import types
 from typing import (
     ClassVar, 
     Literal,
@@ -79,15 +80,15 @@ class BaseIGDBSchema(pt.Model):
     # ==========================================================
 
     # private
-    @staticmethod 
+
+    @staticmethod
     def _clean_type(t) -> str:
         """
         Convert Python annotation to Polars type string.
-
         Unwraps Optional[T], handles List[T] to List(PolType), etc.
         """
         origin = get_origin(t)
-        if origin is Union:
+        if origin is Union or origin is types.UnionType:
             args = [a for a in get_args(t) if a is not type(None)]
             if args:
                 t = args[0]
@@ -95,11 +96,23 @@ class BaseIGDBSchema(pt.Model):
 
         if origin is list:
             inner = get_args(t)[0]
+            # au cas où c'est list[str | None]
+            inner_origin = get_origin(inner)
+            if inner_origin is Union or inner_origin is types.UnionType:
+                inner_args = [a for a in get_args(inner) if a is not type(None)]
+                if inner_args:
+                    inner = inner_args[0]
             return f"List({PY_TO_PL_STR.get(inner, getattr(inner, '__name__', str(inner)))})"
 
         return PY_TO_PL_STR.get(t, getattr(t, "__name__", str(t)))
-    
-    
+        # get col snapshot dict
+    @classmethod
+    def _get_columns_snapshot_dict(cls, is_clean):
+        return {
+            name: cls._clean_type(info.annotation) if is_clean else info.annotation
+            for name, info in cls.model_fields.items()
+        }
+
     # public
         # get fields
     @classmethod 
@@ -159,12 +172,11 @@ class BaseIGDBSchema(pt.Model):
                              format: Literal['json', 'dict', 'list']
     ) -> str | dict | list:
         """
-        Returns a JSON string representation of the table schema (field names and types).
+        Returns a representation of the table schema (field names and types) in different formats.
+
+        Types are also converted to Polar types with the _clean_type() function. 
         """
-        columns_snapshot = {
-            name: cls._clean_type(info.annotation) 
-            for name, info in cls.model_fields.items()
-        }
+        columns_snapshot = cls._get_columns_snapshot_dict(is_clean=True)
 
         if format == 'json':
             return msgspec.json.encode(columns_snapshot).decode('utf-8')
@@ -178,10 +190,7 @@ class BaseIGDBSchema(pt.Model):
         """
         Generates a signature of the table schema.
         """
-        raw_schema = {
-            name: info.annotation
-            for name, info in cls.model_fields.items()
-        }
+        columns_snapshot = cls._get_columns_snapshot_dict(is_clean=True)
         
 
-        return sha256(" ".join(raw_schema).encode()).hexdigest()
+        return sha256(" ".join(columns_snapshot).encode()).hexdigest()
