@@ -11,7 +11,7 @@ from src.utils.alerting import (
 )
 
 # ================================================================
-# Ingestion
+# INGESTION
 # ================================================================
 
 def start_ingestion_run(
@@ -35,7 +35,6 @@ def start_ingestion_run(
         ON CONFLICT (run_id) DO NOTHING;
     """
     _execute(pool, query, {"run_id": run_id, "error_message": error_message, "layer": layer})
-
 
 def complete_ingestion_run(
     pool: ConnectionPool, 
@@ -64,7 +63,6 @@ def complete_ingestion_run(
         "status": status,
         "error_message": error_message
     })
-
 
 def log_batch(
     pool: ConnectionPool,
@@ -101,6 +99,10 @@ def log_batch(
         "error_message": error_message
     })
 
+
+# ================================================================
+# SCHEMA
+# ================================================================
 
 def log_schema_change(
     pool: ConnectionPool,
@@ -189,10 +191,13 @@ def get_recent_columns_snapshot(
     
 
 # ================================================================
-# Checkpoints
+# CHECKPOINTS
 # ================================================================
 
-def get_checkpoints(pool: ConnectionPool, layer: Literal["RAW", "ANALYTICS"] = "RAW") -> dict[str, dict]:
+def get_checkpoints(
+    pool: ConnectionPool, 
+    layer: Literal["RAW", "ANALYTICS"] = "RAW"
+) -> dict[str, dict]:
     """
     Retrieves all table checkpoints from Postgres.
     
@@ -220,7 +225,6 @@ def get_checkpoints(pool: ConnectionPool, layer: Literal["RAW", "ANALYTICS"] = "
                 }
                 for row in cur.fetchall()
             }
-
 
 def upsert_checkpoint(
     pool: ConnectionPool,
