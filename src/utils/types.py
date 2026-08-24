@@ -17,7 +17,7 @@ PY_TO_PL = {
     bytes: pl.Binary,
 }
 
-PY_TO_PL_STR = {k: str(v) for k, v in PY_TO_PL.items()} #TODO: on test ça après
+PY_TO_PL_STR = {k: str(v) for k, v in PY_TO_PL.items()} 
 
 # ================================================================
 # 2. TYPE DEFINITIONS - for schema change detection
