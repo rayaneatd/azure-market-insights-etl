@@ -43,9 +43,19 @@ MODEL_CONFIG = ConfigDict(
 # 2. TECHNICAL COLUMNS - for postgres only
 # ================================================================
 
-#^ Colonnes techniques à ajouter automatiquement lors du chargement Postgres (SCD/audit)
-class TechnicalSchema:
-    pass
+TECH_COLUMNS = {
+    "_ingested_at": "TIMESTAMPTZ DEFAULT NOW() NOT NULL",
+    "_hash": "TEXT NOT NULL"
+}
+
+TECH_SCD2 = TECH_COLUMNS | {
+    "_valid_from": "TIMESTAMPTZ DEFAULT NOW() NOT NULL",
+    "_valid_to": "TIMESTAMPTZ",
+    "_is_current": "BOOLEAN DEFAULT TRUE NOT NULL",
+}
+
+#TODO: auto indexation
+#TODO: on devrait aussi ajouter un checkpoint pour chaque table créée
 
 # ================================================================
 # 3. BASE SCHEMA - basically the mother of classes
@@ -67,10 +77,13 @@ class BaseIGDBSchema(pt.Model):
     # ==========================================================
 
         # propreties        
-    _endpoint: ClassVar[str]
-    _starting_point: ClassVar[int] = STARTING_TIMESTAMP_IGDB_TABLES
-    _limit: ClassVar[int] = 500
-    _offset: ClassVar[int] = 0
+    _endpoint:         ClassVar[str]
+    _starting_point:   ClassVar[int]         = STARTING_TIMESTAMP_IGDB_TABLES
+    _limit:            ClassVar[int]         = 500
+    _offset:           ClassVar[int]         = 0
+    _conserve_history: ClassVar[bool]        = False
+    _use_arrays:       ClassVar[bool | None] = None
+    _index_at:         ClassVar[tuple[str, ...]]   = ()
 
         # config
     model_config = MODEL_CONFIG
@@ -164,16 +177,20 @@ class BaseIGDBSchema(pt.Model):
         # 3. simple case
         return PY_TO_SQL.get(pl_type, "TEXT")
     
-    @classmethod # convert constraits
+    @classmethod #TODO convert constraints
     def _convert_constraints(cls):
         pass
 
-    @classmethod # get col snapshot dict
+    @classmethod # get dict of columns
     def _get_columns_snapshot_dict(cls, is_clean):
         return {
             name: cls._convert_to_polar_types(info.annotation) if is_clean else info.annotation
             for name, info in cls.model_fields.items()
         }
+
+    @classmethod # get technical columns
+    def _get_tech_columns(cls):
+        return TECH_SCD2 if cls._conserve_history else TECH_COLUMNS
 
     # public
     @classmethod # get apicalypse fields
@@ -228,12 +245,19 @@ class BaseIGDBSchema(pt.Model):
 
         return " ".join(query_parts)
 
-    @classmethod # build postgres query
-    def build_pg_query(cls, use_arrays: bool = False):
-        table_name = cls._endpoint.replace('/', '')
+    @classmethod # build query
+    def build_pg_query(cls, use_arrays: bool | None = None):
+        if use_arrays is None:
+            use_arrays = cls._use_arrays if cls._use_arrays is not None else cls._conserve_history
+
+        base_name = cls._endpoint.strip('/').replace('/', '_')
+        singular_base = cls._to_singular(base_name)
+        table_name = f"{base_name}_scd2" if cls._conserve_history else base_name
+        
         main_cols = []
         m2m_tables = []
-
+        tech_cols = cls._get_tech_columns()
+        
         for name, info in cls.model_fields.items():
             pl_type = cls._convert_to_polar_types(info.annotation)
             pg_type = cls._pl_to_pg(pl_type, use_arrays=use_arrays)
@@ -241,25 +265,44 @@ class BaseIGDBSchema(pt.Model):
             if pg_type is None:
                 inner_pl = _LIST_RE.match(pl_type).group(1) # pyrefly: ignore
                 inner_pg = cls._pl_to_pg(inner_pl)
+                m2m_table_name = f"{singular_base}_{name}_scd2" if cls._conserve_history else f"{singular_base}_{name}"
+                singular_rel = cls._to_singular(name)
+                
                 m2m_tables.append(
-                    f"CREATE TABLE IF NOT EXISTS {cls._to_singular(table_name)}_{name} (\n"
-                    f"  {cls._to_singular(table_name)}_id BIGINT REFERENCES {table_name}(id),\n"
-                    f"  {cls._to_singular(name)}_id {inner_pg},\n"
-                    f"  PRIMARY KEY ({cls._to_singular(table_name)}_id, {cls._to_singular(name)}_id)\n);"
+                    f"CREATE TABLE IF NOT EXISTS {m2m_table_name} (\n"
+                    f"  {singular_base}_id BIGINT REFERENCES {table_name}(id),\n"
+                    f"  {singular_rel}_id {inner_pg},\n"
+                    f"  PRIMARY KEY ({singular_base}_id, {singular_rel}_id)\n);"
+                )
+                # 1 seul index manuel: le sens inverse
+                m2m_tables.append(
+                    f"CREATE INDEX IF NOT EXISTS idx_{m2m_table_name}_{singular_rel}_id ON {m2m_table_name} ({singular_rel}_id);"
                 )
                 continue
 
             col_def = f'"{name}" {pg_type}'
             if info.is_required():
                 col_def += " NOT NULL"
-            if getattr(info, 'primary_key', False) or name == "id":
+            if not cls._conserve_history and (getattr(info, 'primary_key', False) or name == "id"):
                 col_def += " PRIMARY KEY"
             if getattr(info, 'unique', False):
                 col_def += " UNIQUE"
             main_cols.append(col_def)
 
+        for field, definition in tech_cols.items():
+            main_cols.append(f'"{field}" {definition}')
+
+        if cls._conserve_history:
+            main_cols.append('PRIMARY KEY ("id", "_valid_from")')
+    
         main_ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  " + ",\n  ".join(main_cols) + "\n);"
-        return "\n\n".join([main_ddl] + m2m_tables)
+        
+        indexes = []
+        if cls._index_at:
+            cols = ", ".join(f'"{c}"' for c in cls._index_at)
+            indexes.append(f"CREATE INDEX IF NOT EXISTS idx_{base_name}_{'_'.join(cls._index_at)} ON {table_name} ({cols});")
+
+        return "\n\n".join([main_ddl] + indexes + m2m_tables)
 
     @classmethod # get columns snapshot
     def get_columns_snapshot(cls, 

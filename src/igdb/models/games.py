@@ -1,4 +1,5 @@
 # third party
+from sqlalchemy import false
 import patito as pt
 # local
 from .BASE import BaseIGDBSchema
@@ -6,6 +7,7 @@ from .BASE import BaseIGDBSchema
 # 1. Endpoint: /games
 class GameSchema(BaseIGDBSchema):
     _endpoint = "/games"
+    _conserve_history = True
 
     id: int = pt.Field(unique=True)
     name: str
