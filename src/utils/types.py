@@ -17,7 +17,37 @@ PY_TO_PL = {
     bytes: pl.Binary,
 }
 
+
 PY_TO_PL_STR = {k: str(v) for k, v in PY_TO_PL.items()} 
+
+import re
+
+PY_TO_SQL = {
+    # signed ints
+    "Int8": "SMALLINT",
+    "Int16": "SMALLINT",
+    "Int32": "INTEGER",
+    "Int64": "BIGINT",
+    # unsigned ints -> PG a pas d'unsigned, on upsize
+    "UInt8": "SMALLINT",
+    "UInt16": "INTEGER",
+    "UInt32": "BIGINT",
+    "UInt64": "BIGINT",
+    # floats
+    "Float32": "REAL",
+    "Float64": "DOUBLE PRECISION",
+    # others
+    "Utf8": "TEXT",
+    "String": "TEXT",
+    "Boolean": "BOOLEAN",
+    "Date": "DATE",
+    "Datetime": "TIMESTAMPTZ",
+    "Time": "TIME",
+    "Binary": "BYTEA",
+    "Null": "TEXT", # fallback
+}
+
+_LIST_RE = re.compile(r"^List\((.+)\)$")
 
 # ================================================================
 # 2. TYPE DEFINITIONS - for schema change detection

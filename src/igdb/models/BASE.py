@@ -16,7 +16,9 @@ from pydantic import ConfigDict
 
 # 3. local
 from src.utils.types import (
-    PY_TO_PL_STR
+    PY_TO_PL_STR,
+    PY_TO_SQL   ,
+    _LIST_RE
 )
 
 
@@ -80,9 +82,32 @@ class BaseIGDBSchema(pt.Model):
     # ==========================================================
 
     # private
-
     @staticmethod
-    def _clean_type(t) -> str:
+    def _to_singular(name: str) -> str:
+        """
+        transforms a pleural word to singular
+        """
+        
+        # supports snake_case: involved_companies -> involved_company
+        parts = name.split('_')
+        last = parts[-1]
+
+        if last.endswith('ies'):
+            last = last[:-3] + 'y'  # companies -> company
+        elif last.endswith('ses') or last.endswith('xes') or last.endswith('ches') or last.endswith('shes'):
+            last = last[:-2]         # statuses -> status, genres -> genre? no
+
+            # cas genres = genre + s, on le rattrape en dessous
+            if last.endswith('e') and name.endswith('es'):
+                pass
+        elif last.endswith('s') and not last.endswith('ss'):
+            last = last[:-1]         # genres -> genre, platforms -> platform
+
+        parts[-1] = last
+        return '_'.join(parts)
+
+    @staticmethod # convert python to polar types
+    def _convert_to_polar_types(t) -> str:
         """
         Convert Python annotation to Polars type string.
         Unwraps Optional[T], handles List[T] to List(PolType), etc.
@@ -105,17 +130,53 @@ class BaseIGDBSchema(pt.Model):
             return f"List({PY_TO_PL_STR.get(inner, getattr(inner, '__name__', str(inner)))})"
 
         return PY_TO_PL_STR.get(t, getattr(t, "__name__", str(t)))
-        # get col snapshot dict
-    @classmethod
+    
+    @classmethod # convert polar to postgres types
+    def _pl_to_pg(cls, pl_type: str, use_arrays: bool = True) -> str | None:
+        """
+        Convert a Polars type string (output of _convert_to_polar_types)
+        to a Postgres type.
+
+        - List(Int64) -> BIGINT[] if use_arrays=True
+        - List(Int64) -> None if use_arrays=False (to create M2M table)
+        """
+        pl_type = pl_type.strip()
+
+        # 1. in case it's a List
+        match = _LIST_RE.match(pl_type)
+        if match:
+            inner_pl = match.group(1).strip()
+            inner_pg = cls._pl_to_pg(inner_pl, use_arrays=use_arrays)
+            if inner_pg is None:
+                return None
+            if not use_arrays:
+                return None  # signal to create a join table
+
+            # e.g: Int64 -> BIGINT -> BIGINT[]
+            return f"{inner_pg}[]"
+
+        # 2. dates
+        if pl_type.startswith("Datetime"):
+            return "TIMESTAMPTZ"
+        if pl_type.startswith("Duration"):
+            return "INTERVAL"
+
+        # 3. simple case
+        return PY_TO_SQL.get(pl_type, "TEXT")
+    
+    @classmethod # convert constraits
+    def _convert_constraints(cls):
+        pass
+
+    @classmethod # get col snapshot dict
     def _get_columns_snapshot_dict(cls, is_clean):
         return {
-            name: cls._clean_type(info.annotation) if is_clean else info.annotation
+            name: cls._convert_to_polar_types(info.annotation) if is_clean else info.annotation
             for name, info in cls.model_fields.items()
         }
 
     # public
-        # get fields
-    @classmethod 
+    @classmethod # get apicalypse fields
     def apicalypse_fields(cls) -> str:
         """
         Generates a comma-separated string of all declared fields for the IGDB
@@ -125,8 +186,8 @@ class BaseIGDBSchema(pt.Model):
             info.alias or name
             for name, info in cls.model_fields.items()
         )
-        # build query
-    @classmethod 
+        
+    @classmethod # build apicalypse query
     def build_query(
         cls,
         last_update_value: int = 0,
@@ -166,15 +227,48 @@ class BaseIGDBSchema(pt.Model):
             query_parts.append(f"offset {offset};")
 
         return " ".join(query_parts)
-        # get columns snapshot
-    @classmethod 
+
+    @classmethod # build postgres query
+    def build_pg_query(cls, use_arrays: bool = False):
+        table_name = cls._endpoint.replace('/', '')
+        main_cols = []
+        m2m_tables = []
+
+        for name, info in cls.model_fields.items():
+            pl_type = cls._convert_to_polar_types(info.annotation)
+            pg_type = cls._pl_to_pg(pl_type, use_arrays=use_arrays)
+
+            if pg_type is None:
+                inner_pl = _LIST_RE.match(pl_type).group(1) # pyrefly: ignore
+                inner_pg = cls._pl_to_pg(inner_pl)
+                m2m_tables.append(
+                    f"CREATE TABLE IF NOT EXISTS {cls._to_singular(table_name)}_{name} (\n"
+                    f"  {cls._to_singular(table_name)}_id BIGINT REFERENCES {table_name}(id),\n"
+                    f"  {cls._to_singular(name)}_id {inner_pg},\n"
+                    f"  PRIMARY KEY ({cls._to_singular(table_name)}_id, {cls._to_singular(name)}_id)\n);"
+                )
+                continue
+
+            col_def = f'"{name}" {pg_type}'
+            if info.is_required():
+                col_def += " NOT NULL"
+            if getattr(info, 'primary_key', False) or name == "id":
+                col_def += " PRIMARY KEY"
+            if getattr(info, 'unique', False):
+                col_def += " UNIQUE"
+            main_cols.append(col_def)
+
+        main_ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  " + ",\n  ".join(main_cols) + "\n);"
+        return "\n\n".join([main_ddl] + m2m_tables)
+
+    @classmethod # get columns snapshot
     def get_columns_snapshot(cls, 
                              format: Literal['json', 'dict', 'list']
     ) -> str | dict | list:
         """
         Returns a representation of the table schema (field names and types) in different formats.
 
-        Types are also converted to Polar types with the _clean_type() function. 
+        Types are also converted to Polar types with the _convert_to_polar_types() function. 
         """
         columns_snapshot = cls._get_columns_snapshot_dict(is_clean=True)
 
@@ -184,13 +278,14 @@ class BaseIGDBSchema(pt.Model):
             return columns_snapshot
         elif format == 'list':
             return [name for name, field in cls.model_fields.items()]
-        # get hash signature
-    @classmethod 
+        
+    @classmethod # get hash signature
     def get_signature(cls) -> str:
         """
         Generates a signature of the table schema.
         """
-        columns_snapshot = cls._get_columns_snapshot_dict(is_clean=True)
+        columns_snapshot = cls._get_columns_snapshot_dict(is_clean=False)
         
+        payload = msgspec.json.encode(columns_snapshot)
 
-        return sha256(" ".join(columns_snapshot).encode()).hexdigest()
+        return sha256(payload).hexdigest()
