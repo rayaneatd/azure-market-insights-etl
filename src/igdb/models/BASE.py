@@ -255,29 +255,47 @@ class BaseIGDBSchema(pt.Model):
         table_name = f"{base_name}_scd2" if cls._conserve_history else base_name
         
         main_cols = []
-        m2m_tables = []
+        m2m_tables_dict = {} 
         tech_cols = cls._get_tech_columns()
         
         for name, info in cls.model_fields.items():
             pl_type = cls._convert_to_polar_types(info.annotation)
             pg_type = cls._pl_to_pg(pl_type, use_arrays=use_arrays)
-
+            
             if pg_type is None:
-                inner_pl = _LIST_RE.match(pl_type).group(1) # pyrefly: ignore
+                inner_pl = _LIST_RE.match(pl_type).group(1) # pyrefly: ignore[missing-attribute]
                 inner_pg = cls._pl_to_pg(inner_pl)
-                m2m_table_name = f"{singular_base}_{name}_scd2" if cls._conserve_history else f"{singular_base}_{name}"
                 singular_rel = cls._to_singular(name)
-                
-                m2m_tables.append(
-                    f"CREATE TABLE IF NOT EXISTS {m2m_table_name} (\n"
-                    f"  {singular_base}_id BIGINT REFERENCES {table_name}(id),\n"
-                    f"  {singular_rel}_id {inner_pg},\n"
-                    f"  PRIMARY KEY ({singular_base}_id, {singular_rel}_id)\n);"
-                )
-                # 1 seul index manuel: le sens inverse
-                m2m_tables.append(
-                    f"CREATE INDEX IF NOT EXISTS idx_{m2m_table_name}_{singular_rel}_id ON {m2m_table_name} ({singular_rel}_id);"
-                )
+                m2m_table_name = f"{singular_base}_{name}_scd2" if cls._conserve_history else f"{singular_base}_{name}"
+
+                # avoid duplication
+                if m2m_table_name in m2m_tables_dict:
+                    continue 
+
+                if cls._conserve_history:
+                    
+                    cols = {
+                        f"{singular_base}_id": "BIGINT NOT NULL",
+                        f"{singular_rel}_id": f"{inner_pg} NOT NULL",
+                    }
+                    cols.update(tech_cols)
+                    
+                    col_defs = [f'"{k}" {v}' if k in tech_cols else f"{k} {v}" for k,v in cols.items()]
+                    col_defs.append(f'PRIMARY KEY ({singular_base}_id, {singular_rel}_id, "_valid_from")')
+
+                    m2m_tables_dict[m2m_table_name] = [
+                        f"CREATE TABLE IF NOT EXISTS {m2m_table_name} (\n  " + ",\n  ".join(col_defs) + "\n);",
+                        f"CREATE INDEX IF NOT EXISTS idx_{m2m_table_name}_{singular_rel}_id ON {m2m_table_name} ({singular_rel}_id);",
+                        f"CREATE INDEX IF NOT EXISTS idx_{m2m_table_name}_current ON {m2m_table_name} ({singular_base}_id) WHERE _is_current = TRUE;"
+                    ]
+                else:
+                    m2m_tables_dict[m2m_table_name] = [
+                        f"CREATE TABLE IF NOT EXISTS {m2m_table_name} (\n"
+                        f"  {singular_base}_id BIGINT REFERENCES {table_name}(id),\n"
+                        f"  {singular_rel}_id {inner_pg},\n"
+                        f"  PRIMARY KEY ({singular_base}_id, {singular_rel}_id)\n);",
+                        f"CREATE INDEX IF NOT EXISTS idx_{m2m_table_name}_{singular_rel}_id ON {m2m_table_name} ({singular_rel}_id);"
+                    ]
                 continue
 
             col_def = f'"{name}" {pg_type}'
@@ -291,10 +309,9 @@ class BaseIGDBSchema(pt.Model):
 
         for field, definition in tech_cols.items():
             main_cols.append(f'"{field}" {definition}')
-
         if cls._conserve_history:
             main_cols.append('PRIMARY KEY ("id", "_valid_from")')
-    
+
         main_ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  " + ",\n  ".join(main_cols) + "\n);"
         
         indexes = []
@@ -302,6 +319,7 @@ class BaseIGDBSchema(pt.Model):
             cols = ", ".join(f'"{c}"' for c in cls._index_at)
             indexes.append(f"CREATE INDEX IF NOT EXISTS idx_{base_name}_{'_'.join(cls._index_at)} ON {table_name} ({cols});")
 
+        m2m_tables = [ddl for lst in m2m_tables_dict.values() for ddl in lst]
         return "\n\n".join([main_ddl] + indexes + m2m_tables)
 
     @classmethod # get columns snapshot
