@@ -4,7 +4,7 @@ import msgspec
 from .auth import TwitchAuth
 from email.utils import parsedate_to_datetime
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from ..utils.log_messages import log_to_discord, AlertLevel
+from src.utils.alerting import log_to_discord, AlertLevel
 
 
 # ================================================================
