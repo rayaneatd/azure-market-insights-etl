@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS logs.ingestion_runs (
 );
 -- Table for Watermarks, Checkpoints and Fallback active/manual state
 CREATE TABLE IF NOT EXISTS logs.ingestion_checkpoints (
-    table_name VARCHAR(100) PRIMARY KEY,
+    checkpoint_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    table_name VARCHAR(100) NOT NULL,
     current_watermark BIGINT NOT NULL DEFAULT 0,
     fallback_watermark BIGINT NOT NULL DEFAULT 0,
     last_id INT NOT NULL DEFAULT 0,

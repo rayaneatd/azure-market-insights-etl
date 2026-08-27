@@ -30,6 +30,7 @@ def run_full_pipeline():
     
     
     # main pipeline
+    #TODO; la fonction qui log les runs sera déplacée ici, peut etre qu'on sépare Raw et Analytics, on met tout en pending puis on update à chaque début des deux pipelines respectives
     do_ingestion(datalake_service_client, database_pool)
 
 if __name__ == "__main__":
