@@ -34,7 +34,8 @@ def ingest_batches_to_postgres(azure_client: DataLakeServiceClient | BlobService
     PLACEHOLDER — future implementation.
     Reads newly landed raw/bronze batches from ADLS and loads them into Postgres.
     """
+    ensure_schema(db_pool=db_pool)
 
     dataframe: pl.DataFrame
+
     
-    ensure_schema(db_pool=db_pool)

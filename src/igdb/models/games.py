@@ -8,6 +8,8 @@ from .BASE import BaseIGDBSchema
 class GameSchema(BaseIGDBSchema):
     _endpoint = "/games"
     _conserve_history = True
+    _use_arrays = False
+    _index_at = ()
 
     id: int = pt.Field(unique=True)
     name: str
