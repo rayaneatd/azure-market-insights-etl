@@ -201,7 +201,7 @@ def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient,
     """
     now = datetime.now(timezone.utc)
 
-    path = f"IGDB/{str(Model._endpoint).lstrip('/')}/year={now.year}/month={now.month}/day={now.day}/{cursor}_{offset}.json"
+    path = f"IGDB/{str(Model._endpoint).lstrip('/')}/year={now.year}/month={now.month:02d}/day={now.day:02d}/{cursor}_{offset}.json"
 
     write_into_raw(
         azure_client,
