@@ -1,11 +1,15 @@
 from psycopg_pool import ConnectionPool
-from psycopg.rows import namedtuple_row
-from typing import Literal, Any
+from psycopg.rows import dict_row
+from typing import Literal
 
 from .core import _execute
+from .types import FallbackEvent
 
 
-def get_pending_fallback_events(pool: ConnectionPool, layer: str = "RAW") -> list[dict[str, Any]]:
+def get_pending_fallback_events(
+    pool: ConnectionPool, 
+    layer: Literal['RAW', 'ANALYTICS']
+) -> list[FallbackEvent]:
     """Retrieves pending fallback events in FIFO order."""
     query = """
         SELECT event_id::text, table_name, layer, start_watermark, end_watermark, status
@@ -14,24 +18,14 @@ def get_pending_fallback_events(pool: ConnectionPool, layer: str = "RAW") -> lis
         ORDER BY created_at ASC;
     """
     with pool.connection() as conn:
-        with conn.cursor(row_factory=namedtuple_row) as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"layer": layer})
-            return [
-                {
-                    "event_id": row.event_id,  # pyrefly: ignore
-                    "table_name": row.table_name,  # pyrefly: ignore
-                    "layer": row.layer,  # pyrefly: ignore
-                    "start_watermark": row.start_watermark,  # pyrefly: ignore
-                    "end_watermark": row.end_watermark,  # pyrefly: ignore
-                    "status": row.status  # pyrefly: ignore
-                }
-                for row in cur.fetchall()
-            ]
+            return [FallbackEvent(**row) for row in cur.fetchall()]
 
 
 def update_fallback_event_status(
     pool: ConnectionPool,
-    event_id: str,
+    event_id: str | None,
     status: Literal["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"],
     records_processed: int = 0,
     error_message: str | None = None

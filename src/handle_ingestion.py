@@ -1,4 +1,5 @@
 # 1. stdlib
+from dataclasses import dataclass
 import json
 import time
 import traceback
@@ -39,70 +40,60 @@ from src.utils.types import ChangedColumns, TypeChange
 bucket = TokenBucket(capacity=4, fill_rate=4) # 4 req/s
 
 
+@dataclass(slots=True)
+class IngestionTask:
+    """Represents resolved ingestion parameter state for a table."""
+    cursor: int
+    end_watermark: int | None
+    last_id: int
+    offset: int
+    is_fallback_event: bool
+    event_id: str | None
+
+
 # ================================================================
 # 1. CHECKPOINT / FALLBACK
 # ================================================================
 
-def _construct_tables_dict(db_pool: ConnectionPool) -> dict[type, dict]:
+def _construct_tables_dict(db_pool: ConnectionPool) -> dict[type, IngestionTask]:
     """
-    Checks for PENDING fallback events in logs.fallback_events first.
-    If events exist, configures tables to process the fallback window without touching checkpoints.
-    Otherwise, reads checkpoints from logs.ingestion_checkpoints.
+    Checks for PENDING fallback events and standard checkpoints per table.
+    Pure read-only query without side effects.
     """
     defined_classes = BaseIGDBSchema.__subclasses__()
-    class_map = {cls.__name__: cls for cls in defined_classes}
     pending_events = get_pending_fallback_events(db_pool, layer="RAW")
-
-    resolved = {}
-
-    # 1. Process pending fallback events first (Event-Driven)
-    if pending_events:
-        for event in pending_events:
-            table_name = event["table_name"]
-            if table_name in class_map:
-                cls = class_map[table_name]
-                # Mark event as IN_PROGRESS
-                update_fallback_event_status(db_pool, event["event_id"], status="IN_PROGRESS")
-                resolved[cls] = {
-                    "cursor": event["start_watermark"],
-                    "end_watermark": event["end_watermark"],
-                    "last_id": 0,
-                    "offset": 0,
-                    "is_fallback_event": True,
-                    "event_id": event["event_id"]
-                }
-        if resolved:
-            return resolved
-
-    # 2. Standard continuous incremental checkpointing
     checkpoints = get_checkpoints(db_pool, layer="RAW")
+
+    fallback_map = {event.table_name: event for event in pending_events}
+
+    resolved: dict[type, IngestionTask] = {}
 
     for cls in defined_classes:
         name = cls.__name__
-        if name not in checkpoints:
-            upsert_checkpoint(
-                pool=db_pool,
-                table_name=name,
-                current_watermark=cls._starting_point,
-                last_id=0,
-                layer="RAW",
-                offset_val=0,
-                run_id=None,
-                is_override_active=False
-            )
-            upsert_fallback_checkpoint(db_pool, name, cls._starting_point)
-            checkpoints = get_checkpoints(db_pool, layer="RAW")
 
-        ckpt = checkpoints[name]
-        current_ts = ckpt["current_watermark"] if ckpt["current_watermark"] > 0 else cls._starting_point
-        resolved[cls] = {
-            "cursor": current_ts,
-            "end_watermark": None,
-            "last_id": ckpt["last_id"],
-            "offset": ckpt["offset_val"],
-            "is_fallback_event": False,
-            "event_id": None
-        }
+        # 1. Table has a PENDING fallback event
+        if name in fallback_map:
+            event = fallback_map[name]
+            resolved[cls] = IngestionTask(
+                cursor=event.start_watermark,
+                end_watermark=event.end_watermark,
+                last_id=0,
+                offset=0,
+                is_fallback_event=True,
+                event_id=event.event_id
+            )
+        # 2. Standard continuous incremental checkpoint
+        else:
+            ckpt = checkpoints.get(name)
+            current_ts = ckpt.current_watermark if (ckpt and ckpt.current_watermark > 0) else cls._starting_point
+            resolved[cls] = IngestionTask(
+                cursor=current_ts,
+                end_watermark=None,
+                last_id=ckpt.last_id if ckpt else 0,
+                offset=ckpt.offset_val if ckpt else 0,
+                is_fallback_event=False,
+                event_id=None
+            )
 
     return resolved
 
@@ -216,14 +207,14 @@ def _ingest_tables(
     db_pool: ConnectionPool,
     azure_client,
     Model: Any,
-    meta,
-    run_id
+    task: IngestionTask,
+    run_id: str
 ):
     """
     Ingest a single IGDB table with resume + fallback support.
 
     Args:
-        meta: dict with cursor, offset, last_id, end_watermark, is_fallback_event
+        task: IngestionTask dataclass with cursor, offset, last_id, end_watermark, is_fallback_event, event_id
     Returns:
         True if success, False if failed (logs to discord)
 
@@ -233,14 +224,17 @@ def _ingest_tables(
         - closes fallback event when max_seen >= end_watermark or batch < 500
     """
 
-    cursor = meta["cursor"]
-    end_watermark = meta["end_watermark"]
-    last_id = meta["last_id"]
-    offset = meta["offset"]
-    is_fallback_event = meta["is_fallback_event"]
-    event_id = meta["event_id"]
+    cursor = task.cursor
+    end_watermark = task.end_watermark
+    last_id = task.last_id
+    offset = task.offset
+    is_fallback_event = task.is_fallback_event
+    event_id = task.event_id
     max_seen = cursor
     event_records_count = 0
+
+    if is_fallback_event and event_id:
+        update_fallback_event_status(db_pool, event_id, status="IN_PROGRESS")
 
     detect_and_log_schema_change(
         db_pool=db_pool,
@@ -407,12 +401,12 @@ def do_ingestion(azure_client: DataLakeServiceClient | BlobServiceClient, db_poo
     try:
         tables = _construct_tables_dict(db_pool)
 
-        for Model, meta in tables.items():
+        for Model, task in tables.items():
             _ingest_tables(
                 db_pool=db_pool,
                 azure_client=azure_client,
                 Model=Model,
-                meta=meta,
+                task=task,
                 run_id=run_id
             )
 

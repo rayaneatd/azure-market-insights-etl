@@ -1,10 +1,11 @@
 import msgspec
 
 from psycopg_pool import ConnectionPool
-from psycopg.rows import namedtuple_row
+from psycopg.rows import dict_row, namedtuple_row
 from typing import Literal
 
 from .core import _execute
+from .types import TableCheckpoint
 from src.utils.types import ChangedColumns, TypeChange
 from src.utils.alerting import (
     log_to_discord, AlertLevel
@@ -197,7 +198,7 @@ def get_recent_columns_snapshot(
 def get_checkpoints(
     pool: ConnectionPool, 
     layer: Literal["RAW", "ANALYTICS"] = "RAW"
-) -> dict[str, dict]:
+) -> dict[str, TableCheckpoint]:
     """
     Retrieves all table checkpoints from Postgres.
     
@@ -212,19 +213,9 @@ def get_checkpoints(
     """
     
     with pool.connection() as conn:
-        with conn.cursor(row_factory=namedtuple_row) as cur:
+        with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"layer": layer})
-            
-            return { 
-                row.table_name: { # pyrefly: ignore 
-                    "current_watermark": row.current_watermark, # pyrefly: ignore 
-                    "fallback_watermark": row.fallback_watermark, # pyrefly: ignore 
-                    "last_id": row.last_id, # pyrefly: ignore 
-                    "offset_val": row.offset_val, # pyrefly: ignore 
-                    "is_override_active": row.is_override_active # pyrefly: ignore 
-                }
-                for row in cur.fetchall()
-            }
+            return {row["table_name"]: TableCheckpoint(**row) for row in cur.fetchall()}
 
 def upsert_checkpoint(
     pool: ConnectionPool,

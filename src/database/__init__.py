@@ -19,6 +19,8 @@ This module provides functions for interacting with the database, including:
 """
 
 
+from .types import TableCheckpoint, FallbackEvent, AnalyticsTask
+
 from .auth import init_database_engine
 
 from .core import (
