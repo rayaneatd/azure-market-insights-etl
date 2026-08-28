@@ -82,13 +82,13 @@ class BaseIGDBSchema(pt.Model):
     _limit:            ClassVar[int]         = 500
     _offset:           ClassVar[int]         = 0
     _conserve_history: ClassVar[bool]        = False
-    _use_arrays:       ClassVar[bool | None] = None
     _index_at:         ClassVar[tuple[str, ...]]   = ()
     _if_table_exists:  ClassVar[Literal["append", "fail", "replace"]] = "append"
-
+    _tables:           ClassVar[dict[str, int]] = {}
+    
         # config
     model_config = MODEL_CONFIG
-
+    
 
 
     # ==========================================================
@@ -247,14 +247,12 @@ class BaseIGDBSchema(pt.Model):
         return " ".join(query_parts)
 
     @classmethod # build query
-    def build_pg_query(cls, use_arrays: bool | None = None):
-        if use_arrays is None:
-            use_arrays = cls._use_arrays if cls._use_arrays is not None else cls._conserve_history
-
+    def build_pg_query(cls):
         base_name = cls._endpoint.strip('/').replace('/', '_')
         singular_base = cls._to_singular(base_name)
         table_name = f"{base_name}_scd2" if cls._conserve_history else base_name
-        
+        use_arrays = cls._conserve_history # the use of arrays is mandatory for scd2
+
         main_cols = []
         m2m_tables_dict = {} 
         tech_cols = cls._get_tech_columns()
