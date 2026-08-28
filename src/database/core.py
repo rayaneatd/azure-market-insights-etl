@@ -13,8 +13,8 @@ from typing import (
 )
 
 class DatabaseSchema(Enum):
-    LOGS = "logs"
-
+    LOGS      = "logs"
+    ANALYTICS = "public"
 
 def _get_schema_name(schema: DatabaseSchema) -> str:
     return schema.value if isinstance(schema, Enum) else schema

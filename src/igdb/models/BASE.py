@@ -84,6 +84,7 @@ class BaseIGDBSchema(pt.Model):
     _conserve_history: ClassVar[bool]        = False
     _use_arrays:       ClassVar[bool | None] = None
     _index_at:         ClassVar[tuple[str, ...]]   = ()
+    _if_table_exists:  ClassVar[Literal["append", "fail", "replace"]] = "append"
 
         # config
     model_config = MODEL_CONFIG

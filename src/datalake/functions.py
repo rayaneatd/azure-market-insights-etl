@@ -7,7 +7,6 @@ from enum import Enum
 
     # Enum classes
 class Containers(Enum):
-    Control = "control"
     Data    = "data"
 
 
