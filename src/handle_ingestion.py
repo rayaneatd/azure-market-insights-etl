@@ -4,6 +4,7 @@ import time
 import traceback
 import uuid
 from typing import Any, Literal
+from datetime import datetime, timezone
 
 # 2. third party
 from azure.storage.blob import BlobServiceClient
@@ -188,12 +189,20 @@ def detect_and_log_schema_change(
 # ================================================================
 
 
-def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient, Model: type, batch: list[dict], cursor: int, offset: int) -> None:
+def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient, 
+                    Model: type, 
+                    batch: list[dict], 
+                    cursor: int, 
+                    offset: int
+                    ) -> None:
     """
     Persists a raw page of records to the bronze/raw zone in ADLS.
     Path pattern keeps pages uniquely addressable and roughly time-ordered.
     """
-    path = f"{Model._endpoint}/{cursor}_{offset}.json"
+    now = datetime.now(timezone.utc)
+
+    path = f"IGDB/{str(Model._endpoint).lstrip('/')}/year={now.year}/month={now.month}/day={now.day}/{cursor}_{offset}.json"
+
     write_into_raw(
         azure_client,
         Containers.Data.value,
