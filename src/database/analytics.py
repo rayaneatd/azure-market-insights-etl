@@ -1,21 +1,45 @@
-# 1. third party
+# 1. native
+from app.server import db_pool
+from concurrent.futures import ThreadPoolExecutor
+
+# 2. third party
 from src.igdb.models import BaseIGDBSchema
 import polars as pl
 from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
 from psycopg_pool import ConnectionPool
 
-# 2. local
+import io
+from concurrent.futures import ThreadPoolExecutor
+ 
+ 
+
+# 3. local
 from src.igdb.models import * #! this is important
-from src.database.core import DatabaseSchema, execute_sql_from_string, update_into_db
+from src.database.core import (
+    DatabaseSchema, 
+    execute_sql_from_string, 
+    update_into_db
+)
+from src.datalake.functions import (
+    Containers,
+    read_from_raw 
+)
 from .types import AnalyticsTask
-from src.database.logs import get_checkpoints, upsert_checkpoint
+from src.database.logs import (
+    get_checkpoints, 
+    upsert_checkpoint, 
+    get_unconsumed_raw_batches
+)
 from src.database.fallback import (
     get_pending_fallback_events, 
     update_fallback_event_status, 
     upsert_fallback_checkpoint
 )
-from src.utils.alerting import AlertLevel, log_to_discord
+from src.utils.alerting import (
+    AlertLevel, 
+    log_to_discord
+)
 
 
 def _get_watermark_dict(db_pool: ConnectionPool) -> dict[type, AnalyticsTask]:
@@ -85,13 +109,61 @@ def ensure_schema(db_pool: ConnectionPool) -> None:
         query = cls.build_pg_query()
         execute_sql_from_string(pool=db_pool, query=query)
 
+
 def get_data_from_datalake(
-    azure_client: DataLakeServiceClient | BlobServiceClient, 
-    Model: type, 
-    task: AnalyticsTask
+    azure_client: DataLakeServiceClient | BlobServiceClient,
+    db_pool: ConnectionPool,
+    Model: type,
+    task: AnalyticsTask,
 ) -> pl.DataFrame:
-    """Reads raw bronze batches from ADLS for a specific model and watermark range."""
-    return pl.DataFrame()
+    """
+    Reads raw bronze batches from ADLS for a specific model and watermark
+    range, and returns them concatenated into a single DataFrame.
+ 
+    Which files to read is resolved entirely from logs.batch_logs (via
+    get_unconsumed_raw_batches). Downloads happen concurrently (I/O-bound, safe:
+    the file list is already fully known up front, no ordering
+    dependency between files). Parsing happens sequentially afterwards,
+    so Polars' own internal thread pool isn't competing against the
+    download threads.
+ 
+    Raises:
+        FileNotFoundError: If batch_logs claims a batch succeeded but the
+            corresponding blob is missing from ADLS — a real data
+            integrity issue, not something to skip silently.
+    """
+    paths = get_unconsumed_raw_batches(
+        pool=db_pool,
+        table_name=Model.__name__,
+        endpoint=Model._endpoint,
+        start_watermark=task.start_watermark,
+        end_watermark=task.end_watermark,
+    )
+ 
+    if not paths:
+        return pl.DataFrame()
+ 
+    def _download(path: str) -> bytes | None:
+        return read_from_raw(azure_client, Containers.Data.value, path)
+ 
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        raw_blobs = list(executor.map(_download, paths))
+ 
+    missing = [p for p, b in zip(paths, raw_blobs) if b is None]
+    if missing:
+        log_to_discord(
+            f"{len(missing)} batch(es) marked SUCCESS in batch_logs but "
+            f"missing from ADLS for {Model.__name__}: {missing[:5]}"
+            f"{'...' if len(missing) > 5 else ''}",
+            AlertLevel.ERROR,
+        )
+        raise FileNotFoundError(
+            f"Missing raw blob(s) for {Model.__name__}: {len(missing)} file(s)"
+        )
+ 
+    frames = [pl.read_json(io.BytesIO(b)) for b in raw_blobs if b is not None]
+    return pl.concat(frames) if frames else pl.DataFrame()
+ 
 
 def run_data_transformations(
     Model: type,
@@ -123,6 +195,7 @@ def ingest_batches_to_postgres(
         # 1. Fetch raw batch for this model and watermark window
         raw_df: pl.DataFrame = get_data_from_datalake(
             azure_client=azure_client,
+            db_pool=db_pool,
             Model=Model,
             task=task
         )

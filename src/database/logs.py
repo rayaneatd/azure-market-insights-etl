@@ -2,7 +2,7 @@ import msgspec
 
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row, namedtuple_row
-from typing import Literal
+from typing import Literal, Any
 
 from .core import _execute
 from .types import TableCheckpoint
@@ -266,3 +266,55 @@ def upsert_checkpoint(
         "is_override_active": is_override_active
     })
 
+def get_unconsumed_raw_batches(
+    pool: ConnectionPool,
+    table_name: str,
+    endpoint: str,
+    start_watermark: int,
+    end_watermark: int | None = None,
+) -> list[str]:
+    """
+    Returns the ADLS paths of every successfully-ingested RAW batch for
+    `table_name` within (start_watermark, end_watermark] (or with no
+    upper bound if end_watermark is None, i.e. the standard incremental
+    case rather than a fallback replay).
+ 
+    Paths are reconstructed from batch_logs' own recorded cursor_value,
+    offset_value and created_at, using the same Hive-style layout
+    _save_raw_batch writes to. This relies on created_at being the exact
+    instant the file was written (passed explicitly to log_batch as the
+    same `now` _save_raw_batch used) rather than the DB's own insert
+    time — otherwise a batch written right around UTC midnight could be
+    reconstructed under the wrong day= partition.
+    """
+    base_query = """
+        SELECT cursor_value, offset_value, created_at
+        FROM logs.batch_logs
+        WHERE table_name = %(table_name)s
+          AND layer = 'RAW'
+          AND status = 'SUCCESS'
+          AND cursor_value > %(start_watermark)s
+    """
+    params: dict[str, Any] = {
+        "table_name": table_name,
+        "start_watermark": start_watermark,
+    }
+ 
+    if end_watermark is not None:
+        base_query += " AND cursor_value <= %(end_watermark)s"
+        params["end_watermark"] = end_watermark
+ 
+    base_query += " ORDER BY cursor_value ASC;"
+ 
+    with pool.connection() as conn:
+        with conn.cursor(row_factory=namedtuple_row) as cur:
+            cur.execute(base_query, params)
+            rows = cur.fetchall()
+ 
+    endpoint_clean = endpoint.strip("/")
+    return [
+        f"IGDB/{endpoint_clean}/year={r.created_at.year}/"
+        f"month={r.created_at.month:02d}/day={r.created_at.day:02d}/"
+        f"{r.cursor_value}_{r.offset_value}.json" # pyrefly: ignore
+        for r in rows
+    ]

@@ -184,13 +184,13 @@ def _save_raw_batch(azure_client: DataLakeServiceClient | BlobServiceClient,
                     Model: type, 
                     batch: list[dict], 
                     cursor: int, 
-                    offset: int
+                    offset: int,
+                    now: datetime
                     ) -> None:
     """
     Persists a raw page of records to the bronze/raw zone in ADLS.
     Path pattern keeps pages uniquely addressable and roughly time-ordered.
     """
-    now = datetime.now(timezone.utc)
 
     path = f"IGDB/{str(Model._endpoint).lstrip('/')}/year={now.year}/month={now.month:02d}/day={now.day:02d}/{cursor}_{offset}.json"
 
@@ -259,6 +259,8 @@ def _ingest_tables(
             batch = []
             batch_status = "SUCCESS"
             batch_err = None
+            now = datetime.now(timezone.utc)
+            
             try:
                 batch = extract_igdb_data(
                     url=f"{BASE_IGDB_URL}{Model._endpoint}",
@@ -323,7 +325,13 @@ def _ingest_tables(
                         f"Record missing 'updated_at' or 'id' for {Model.__name__}: {record}"
                     )
             # Persist raw page to ADLS Raw zone
-            _save_raw_batch(azure_client, Model, batch, cursor, offset)
+            _save_raw_batch(
+                azure_client=azure_client, 
+                Model=Model, 
+                batch=batch, 
+                cursor=cursor, 
+                offset=offset,
+                now=now)
             event_records_count += len(batch)
             batch_max_ts = max(r["updated_at"] for r in batch)
             batch_max_id_for_ts = max(r["id"] for r in batch if r["updated_at"] == batch_max_ts)
