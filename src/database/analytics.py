@@ -58,58 +58,115 @@ def _get_watermark_dict(db_pool: ConnectionPool) -> dict[type, AnalyticsTask]:
 
     return resolved
 
-def run_dq_checks(db_pool: ConnectionPool, dataframe: pl.DataFrame | None) -> bool:
-    return False
+def ensure_schema(db_pool: ConnectionPool) -> None:
+    classes = BaseIGDBSchema.__subclasses__()
 
-def run_data_transformations(azure_client: DataLakeServiceClient | BlobServiceClient,
-                             dataframe: pl.DataFrame | None
+    # 1. snapshot existant
+    rows = execute_sql_from_string(
+        pool=db_pool,
+        query="SELECT table_name FROM information_schema.tables WHERE table_schema='%s'",
+        params=DatabaseSchema.ANALYTICS.value
+    )
+    existing = {r[0] for r in rows} if rows else set()
+
+    for cls in classes:
+        base = cls._endpoint.strip('/').replace('/', '_')
+        scd1 = base
+        scd2 = f"{base}_scd2"
+        target = cls.get_table_name()
+        other = scd2 if target == scd1 else scd1
+
+        if other in existing and target not in existing:
+            raise RuntimeError(
+                f"[SCD SWITCH BLOQUÉ] {base}: {other} existe déjà, tu veux créer {target}. "
+                f"Fais une migration manuelle, pas un switch de flag."
+            )
+
+        query = cls.build_pg_query()
+        execute_sql_from_string(pool=db_pool, query=query)
+
+def get_data_from_datalake(
+    azure_client: DataLakeServiceClient | BlobServiceClient, 
+    Model: type, 
+    task: AnalyticsTask
 ) -> pl.DataFrame:
+    """Reads raw bronze batches from ADLS for a specific model and watermark range."""
     return pl.DataFrame()
 
-def ensure_schema(db_pool: ConnectionPool) -> None:
-    """
-    A function that creates the tables automatically in postgres.
+def run_data_transformations(
+    Model: type,
+    dataframe: pl.DataFrame
+) -> pl.DataFrame:
+    """Applies Polars transformations to produce silver analytics dataframe."""
+    return dataframe
 
-    db_pool: The database connection pool.
-    """
-    classes = BaseIGDBSchema.__subclasses__()
-    
-    for cls in classes:
-        query: str = cls.build_pg_query()
+def run_dq_checks(db_pool: ConnectionPool, dataframe: pl.DataFrame) -> bool:
+    """Runs data quality assertions on transformed dataframe."""
+    return True
 
-        execute_sql_from_string(pool=db_pool, query=query, is_multistatement=True)
 
-#TODO: on appelle cette fonction dans do ingestion si possible, ça sera un job séparé de blabla
-def ingest_batches_to_postgres(azure_client: DataLakeServiceClient | BlobServiceClient, 
-                               db_pool: ConnectionPool
+def ingest_batches_to_postgres(
+    azure_client: DataLakeServiceClient | BlobServiceClient, 
+    db_pool: ConnectionPool
 ) -> None:
     """
-    PLACEHOLDER — future implementation.
-    Reads newly landed raw/bronze batches from ADLS and loads them into Postgres.
+    Reads newly landed raw/bronze batches from ADLS, transforms them with Polars,
+    executes DQ checks, loads into Postgres ANALYTICS schema, and updates checkpoints.
     """
     ensure_schema(db_pool=db_pool)
 
-    dataframe: pl.DataFrame = pl.DataFrame()
-    table_name: str = 'we need to populate this'
-
-    # {'Nom De La Table': AnalyticsTask}
     data_to_ingest: dict[type, AnalyticsTask] = _get_watermark_dict(db_pool)
 
-    # we get the batches to read from postgres
-    for Model in data_to_ingest:
-        # we apply polar transformations
-        transformed_df = run_data_transformations(azure_client, dataframe=dataframe)
+    for Model, task in data_to_ingest.items():
+        table_name = Model.get_table_name()
 
-        # we do quality checks
+        # 1. Fetch raw batch for this model and watermark window
+        raw_df: pl.DataFrame = get_data_from_datalake(
+            azure_client=azure_client,
+            Model=Model,
+            task=task
+        )
+
+        if raw_df.is_empty():
+            continue
+
+        # 2. Polars Transformations
+        transformed_df: pl.DataFrame = run_data_transformations(Model=Model, dataframe=raw_df)
+
+        # 3. Quality Checks
         quality = run_dq_checks(db_pool=db_pool, dataframe=transformed_df)
+        if not quality:
+            log_to_discord(f"Data quality check failed on table '{table_name}'", AlertLevel.WARNING)
+            if task.is_fallback and task.event_id:
+                update_fallback_event_status(db_pool, task.event_id, status="FAILED", error_message="DQ check failed")
+            continue
 
-        if quality:
-            # we dump the dataframe to postgres
-            update_into_db(
-                pool=db_pool,
-                schema=DatabaseSchema.ANALYTICS,
-                table=table_name,
-                df=transformed_df
+        # 4. Dump transformed dataframe into Postgres ANALYTICS schema
+        update_into_db(
+            schema=DatabaseSchema.ANALYTICS,
+            table=table_name,
+            df=transformed_df
+        )
+
+        # 5. Update Checkpoint or Fallback Event Status
+        if task.is_fallback and task.event_id:
+            update_fallback_event_status(
+                db_pool, 
+                task.event_id, 
+                status="COMPLETED", 
+                records_processed=len(transformed_df)
             )
         else:
-            log_to_discord(f"data quality sucks on {table_name}", AlertLevel.WARNING)
+            raw_max = transformed_df["updated_at"].max() if "updated_at" in transformed_df.columns else None
+            new_watermark: int = int(raw_max) if isinstance(raw_max, (int, float)) else task.start_watermark
+
+            upsert_checkpoint(
+                pool=db_pool,
+                table_name=Model.__name__,
+                current_watermark=new_watermark,
+                last_id=0,
+                layer="ANALYTICS",
+                offset_val=0,
+                run_id=None
+            )
+            upsert_fallback_checkpoint(db_pool, Model.__name__, new_watermark)

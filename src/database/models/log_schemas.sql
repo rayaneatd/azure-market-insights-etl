@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS logs.ingestion_checkpoints (
     offset_val INT NOT NULL DEFAULT 0,
     is_override_active BOOLEAN NOT NULL DEFAULT FALSE,
     last_successful_run_id UUID REFERENCES logs.ingestion_runs(run_id),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (table_name, layer)
 );
 CREATE TABLE IF NOT EXISTS logs.fallback_events (
     event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

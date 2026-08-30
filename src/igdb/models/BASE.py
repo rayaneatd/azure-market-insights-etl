@@ -246,11 +246,17 @@ class BaseIGDBSchema(pt.Model):
 
         return " ".join(query_parts)
 
+    @classmethod
+    def get_table_name(cls) -> str:
+        """Returns the PostgreSQL table name for this model schema."""
+        base_name = cls._endpoint.strip('/').replace('/', '_')
+        return f"{base_name}_scd2" if cls._conserve_history else base_name
+
     @classmethod # build query
     def build_pg_query(cls):
         base_name = cls._endpoint.strip('/').replace('/', '_')
         singular_base = cls._to_singular(base_name)
-        table_name = f"{base_name}_scd2" if cls._conserve_history else base_name
+        table_name = cls.get_table_name()
         use_arrays = cls._conserve_history # the use of arrays is mandatory for scd2
 
         main_cols = []
