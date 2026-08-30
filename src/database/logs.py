@@ -247,7 +247,7 @@ def upsert_checkpoint(
         VALUES (
             %(table_name)s, %(current_watermark)s, %(last_id)s, %(layer)s, %(offset_val)s, %(run_id)s, %(is_override_active)s, CURRENT_TIMESTAMP
         )
-        ON CONFLICT (table_name) DO UPDATE SET
+        ON CONFLICT (table_name, layer) DO UPDATE SET
             current_watermark = EXCLUDED.current_watermark,
             last_id = EXCLUDED.last_id,
             layer = EXCLUDED.layer,

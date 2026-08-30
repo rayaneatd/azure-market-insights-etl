@@ -64,7 +64,7 @@ def ensure_schema(db_pool: ConnectionPool) -> None:
     # 1. snapshot existant
     rows = execute_sql_from_string(
         pool=db_pool,
-        query="SELECT table_name FROM information_schema.tables WHERE table_schema='%s'",
+        query="SELECT table_name FROM information_schema.tables WHERE table_schema=%s",
         params=DatabaseSchema.ANALYTICS.value
     )
     existing = {r[0] for r in rows} if rows else set()
@@ -169,4 +169,9 @@ def ingest_batches_to_postgres(
                 offset_val=0,
                 run_id=None
             )
-            upsert_fallback_checkpoint(db_pool, Model.__name__, new_watermark)
+            upsert_fallback_checkpoint(
+                pool=db_pool, 
+                table_name=Model.__name__,
+                layer='ANALYTICS', 
+                fallback_watermark=new_watermark
+            )

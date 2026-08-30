@@ -47,7 +47,11 @@ def update_fallback_event_status(
     })
 
 
-def upsert_fallback_checkpoint(pool: ConnectionPool, table_name: str, fallback_watermark: int) -> None:
+def upsert_fallback_checkpoint(pool: ConnectionPool, 
+                               table_name: str, 
+                               layer: str, 
+                               fallback_watermark: int
+                               ) -> None:
     """
     Updates the fallback/safety point for a table (when run succeeds entirely).
     
@@ -57,13 +61,14 @@ def upsert_fallback_checkpoint(pool: ConnectionPool, table_name: str, fallback_w
         fallback_watermark: The fallback watermark timestamp.
     """
     query = """
-        INSERT INTO logs.ingestion_checkpoints (table_name, fallback_watermark, updated_at)
-        VALUES (%(table_name)s, %(fallback_watermark)s, CURRENT_TIMESTAMP)
-        ON CONFLICT (table_name) DO UPDATE SET
+        INSERT INTO logs.ingestion_checkpoints (table_name, layer, fallback_watermark, updated_at)
+        VALUES (%(table_name)s, %(layer)s, %(fallback_watermark)s, CURRENT_TIMESTAMP)
+        ON CONFLICT (table_name, layer) DO UPDATE SET
             fallback_watermark = EXCLUDED.fallback_watermark,
             updated_at = CURRENT_TIMESTAMP;
     """
     _execute(pool, query, {
         "table_name": table_name,
+        "layer": layer,
         "fallback_watermark": fallback_watermark
     })
