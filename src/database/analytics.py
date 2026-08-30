@@ -9,10 +9,7 @@ from src.igdb.models import BaseIGDBSchema
 import polars as pl
 from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
-from psycopg_pool import ConnectionPool
-
- 
- 
+from psycopg_pool import ConnectionPool 
 
 # 3. local
 from src.igdb.models import * #! this is important
