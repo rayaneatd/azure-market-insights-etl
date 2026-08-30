@@ -310,7 +310,11 @@ def _ingest_tables(
                         offset_val=0,
                         run_id=run_id
                     )
-                    upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
+                    upsert_fallback_checkpoint(
+                        pool=db_pool, 
+                        table_name=Model.__name__,
+                        layer="RAW",
+                        fallback_watermark=max_seen)
                 break
             # Validate records
             for record in batch:
@@ -355,7 +359,12 @@ def _ingest_tables(
                         offset_val=0,
                         run_id=run_id
                     )
-                    upsert_fallback_checkpoint(db_pool, Model.__name__, max_seen)
+                    upsert_fallback_checkpoint(
+                        pool=db_pool, 
+                        table_name=Model.__name__, 
+                        layer="RAW",
+                        fallback_watermark=max_seen
+                    )
                 break
             # Compute next resume state for progressive pagination
             next_offset = offset + 500
