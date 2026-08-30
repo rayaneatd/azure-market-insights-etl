@@ -65,7 +65,7 @@ def ensure_schema(db_pool: ConnectionPool) -> None:
     rows = execute_sql_from_string(
         pool=db_pool,
         query="SELECT table_name FROM information_schema.tables WHERE table_schema=%s",
-        params=DatabaseSchema.ANALYTICS.value
+        params=(DatabaseSchema.ANALYTICS.value,)
     )
     existing = {r[0] for r in rows} if rows else set()
 
