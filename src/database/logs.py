@@ -1,5 +1,6 @@
 import msgspec
 
+from datetime import datetime
 from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row, namedtuple_row
 from typing import Literal, Any
@@ -76,15 +77,19 @@ def log_batch(
     records_count: int,
     duration_ms: int,
     query_sent: str,
+    created_at: datetime,
     error_message: str | None = None
 ) -> None:
     """Logs an individual batch execution details."""
     query = """
         INSERT INTO logs.batch_logs (
-            run_id, table_name, layer, status, cursor_value, offset_value, records_count, duration_ms, query_sent, error_message
+            run_id, table_name, layer, status, cursor_value, offset_value,
+            records_count, duration_ms, query_sent, error_message, created_at
         )
         VALUES (
-            %(run_id)s, %(table_name)s, %(layer)s, %(status)s, %(cursor_value)s, %(offset_value)s, %(records_count)s, %(duration_ms)s, %(query_sent)s, %(error_message)s
+            %(run_id)s, %(table_name)s, %(layer)s, %(status)s, %(cursor_value)s,
+            %(offset_value)s, %(records_count)s, %(duration_ms)s, %(query_sent)s,
+            %(error_message)s, %(created_at)s
         );
     """
     _execute(pool, query, {
@@ -97,7 +102,8 @@ def log_batch(
         "records_count": records_count,
         "duration_ms": duration_ms,
         "query_sent": query_sent,
-        "error_message": error_message
+        "error_message": error_message,
+        "created_at": created_at
     })
 
 

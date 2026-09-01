@@ -167,10 +167,24 @@ def run_data_transformations(
     dataframe: pl.DataFrame
 ) -> pl.DataFrame:
     """Applies Polars transformations to produce silver analytics dataframe."""
+
+    # jv probablement rename cette fonction lol. en gros on retreive les bonnes colonnes du dataframe
+    # on fait un schema check ici... si y a des colonnes en + on ignore mais on est notifiés avec suffisamment
+    # de context pour check les logs etc. si y a des colonnes en - alors on fail ce batch et notif
+    # SI TOUT VA BIEN alors ici on construis le scd2 ou rempli les m2m quoi.
+    # peut etre que jv introduire un ddl generator pour l'upsert dans BASE.py mais bref
+    # c'est ici qu'on fait tout ça 
+    # 
+    # d'ailleurs à voir pour la partie fallback aussi... Car apres avoir implémenté ça, le fallback
+    # sera le GROS prochain truc à faire. Apres ça bah cb je fais un day off + révision archi pour pas me faire
+    # griller en entretien. + j'update la doc + je fais révision de comment je construirai réellement
+    # le projet dans une vraie doc (je code RIEN hein...) + je revois le projet fabric et je fais un POC moche  
     return dataframe
 
 def run_dq_checks(db_pool: ConnectionPool, dataframe: pl.DataFrame) -> bool:
     """Runs data quality assertions on transformed dataframe."""
+    # alors ici rien de spécial juste on prend les pt.Field, on traduis en check postgres
+    # rien de fou. tout va obéir le data contract. ez. 
     return True
 
 

@@ -291,6 +291,7 @@ def _ingest_tables(
                     records_count=len(batch) if batch else 0,
                     duration_ms=elapsed_ms,
                     query_sent=query,
+                    created_at=now,
                     error_message=batch_err
                 )
             if not batch:
