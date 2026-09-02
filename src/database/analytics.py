@@ -16,6 +16,7 @@ from psycopg_pool import ConnectionPool
 from src.igdb.models import BaseIGDBSchema
 from src.database.core import (
     DatabaseSchema, 
+    _validate_identifier,
     execute_sql_from_string, 
     update_into_db
 )
@@ -191,9 +192,15 @@ def enforce_schema_and_types(Model: type, df: pl.DataFrame) -> pl.DataFrame:
 
 
 def deduplicate_records(df: pl.DataFrame) -> pl.DataFrame:
-    """Deduplicates records on entity 'id', preserving the most recent record."""
+    """
+    Deduplicates records on entity 'id', preserving the most recent record.
+    Sorts by updated_at before deduplication to ensure deterministic output
+    regardless of batch input order.
+    """
     if df.is_empty() or "id" not in df.columns:
         return df
+    if "updated_at" in df.columns:
+        df = df.sort("updated_at", descending=False)
     return df.unique(subset=["id"], keep="last")
 
 
@@ -259,15 +266,18 @@ def upsert_into_postgres(
     Idempotent database loading pattern:
     1. Writes DataFrame to a temporary staging table (_staging_<table_name>).
     2. Performs ON CONFLICT upsert from staging into the target table.
-    3. Cleans up staging table.
+    3. Cleans up staging table in a finally block (always runs).
     """
     if df.is_empty():
         return
 
-    schema_name = schema.value if isinstance(schema, DatabaseSchema) else schema
+    schema_name = _validate_identifier(
+        schema.value if isinstance(schema, DatabaseSchema) else schema, "schema"
+    )
+    table_name = _validate_identifier(table_name, "table")
     staging_table = f"_staging_{table_name}"
-    
-    # Write to staging table
+
+    # Write to staging table (replace ensures idempotency on retry)
     update_into_db(
         schema=schema,
         table=staging_table,
@@ -284,10 +294,11 @@ def upsert_into_postgres(
             on_conflict_clause = "DO NOTHING"
         else:
             update_assignments = [f'{c} = EXCLUDED.{c}' for c in cols if c.strip('"') not in conflict_columns]
-            if update_assignments:
-                on_conflict_clause = f"DO UPDATE SET {', '.join(update_assignments)}"
-            else:
-                on_conflict_clause = "DO NOTHING"
+            on_conflict_clause = (
+                f"DO UPDATE SET {', '.join(update_assignments)}"
+                if update_assignments
+                else "DO NOTHING"
+            )
 
         upsert_query = f"""
             INSERT INTO {schema_name}.{table_name} ({cols_str})
@@ -335,14 +346,13 @@ def ingest_batches_to_postgres(
         # Drop list columns from main table if non-SCD2 (since list cols go into M2M tables)
         if not Model._conserve_history:
             main_df_cols = [
-                c for c in clean_df.columns 
-                if not _LIST_RE.match(Model._convert_to_polar_types(Model.model_fields[c].annotation))
-                if c in Model.model_fields
+                c for c in clean_df.columns
+                if c in Model.model_fields  # guard first to prevent KeyError on tech columns
+                and not _LIST_RE.match(Model._convert_to_polar_types(Model.model_fields[c].annotation))
             ] + ["_ingested_at", "_hash"]
             main_df = clean_df.select(main_df_cols)
         else:
             main_df = clean_df
-
 
         if not run_dq_checks(Model=Model, df=main_df):
             if task.is_fallback and task.event_id:
@@ -350,26 +360,34 @@ def ingest_batches_to_postgres(
             continue
 
         # Idempotent Postgres Loading (Main Table + Junction Tables)
-        conflict_cols = ["id", "_valid_from"] if Model._conserve_history else ["id"]
+        try:
+            conflict_cols = ["id", "_valid_from"] if Model._conserve_history else ["id"]
 
-        upsert_into_postgres(
-            db_pool=db_pool,
-            schema=DatabaseSchema.ANALYTICS,
-            table_name=table_name,
-            df=main_df,
-            conflict_columns=conflict_cols
-        )
-
-        for m2m_table, m2m_df in m2m_dfs.items():
-            m2m_conflict = list(m2m_df.columns)
             upsert_into_postgres(
                 db_pool=db_pool,
                 schema=DatabaseSchema.ANALYTICS,
-                table_name=m2m_table,
-                df=m2m_df,
-                conflict_columns=m2m_conflict,
-                is_m2m=True
+                table_name=table_name,
+                df=main_df,
+                conflict_columns=conflict_cols
             )
+
+            for m2m_table, m2m_df in m2m_dfs.items():
+                m2m_conflict = list(m2m_df.columns)
+                upsert_into_postgres(
+                    db_pool=db_pool,
+                    schema=DatabaseSchema.ANALYTICS,
+                    table_name=m2m_table,
+                    df=m2m_df,
+                    conflict_columns=m2m_conflict,
+                    is_m2m=True
+                )
+
+        except Exception as load_err:
+            err_msg = f"Load failed for {Model.__name__}: {load_err}"
+            log_to_discord(err_msg, AlertLevel.ERROR)
+            if task.is_fallback and task.event_id:
+                update_fallback_event_status(db_pool, task.event_id, status="FAILED", error_message=err_msg)
+            continue
 
         # Checkpoints and Fallbacks
         if task.is_fallback and task.event_id:
