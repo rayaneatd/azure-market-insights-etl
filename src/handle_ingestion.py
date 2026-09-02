@@ -168,6 +168,8 @@ def detect_and_log_schema_change(
                 current_changed,
                 run_id
             )  
+
+            # TODO: add a fallback event for the past until the change, once it's done also btw update the fallback event layer to analytics, recycling is peak
     except Exception as schema_err:
         log_to_discord(
             f"Schema change detection failed for table {Model.__name__}: {schema_err}",
