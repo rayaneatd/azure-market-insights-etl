@@ -3,11 +3,14 @@ import types
 from typing import (
     ClassVar, 
     Literal,
+    Sequence,
     Union,
     get_args,
     get_origin
 )
 from hashlib import sha256
+
+IndexElement = str | Sequence[str]
 
 # 2. third party
 import patito as pt
@@ -82,7 +85,7 @@ class BaseIGDBSchema(pt.Model):
     _limit:            ClassVar[int]         = 500
     _offset:           ClassVar[int]         = 0
     _conserve_history: ClassVar[bool]        = False
-    _index_at:         ClassVar[tuple[str, ...]]   = ()
+    _index_at:         ClassVar[Sequence[IndexElement] | str] = ()
     _if_table_exists:  ClassVar[Literal["append", "fail", "replace"]] = "append"
     _tables:           ClassVar[dict[str, int]] = {}
     
@@ -320,12 +323,87 @@ class BaseIGDBSchema(pt.Model):
         main_ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  " + ",\n  ".join(main_cols) + "\n);"
         
         indexes = []
-        if cls._index_at:
-            cols = ", ".join(f'"{c}"' for c in cls._index_at)
-            indexes.append(f"CREATE INDEX IF NOT EXISTS idx_{base_name}_{'_'.join(cls._index_at)} ON {table_name} ({cols});")
+        for cols in cls.get_indexes():
+            idx_name = cls.get_index_name(cols)
+            cols_str = ", ".join(f'"{c}"' for c in cols)
+            indexes.append(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} ({cols_str});")
 
         m2m_tables = [ddl for lst in m2m_tables_dict.values() for ddl in lst]
         return "\n\n".join([main_ddl] + indexes + m2m_tables)
+
+    @classmethod
+    def get_indexes(cls) -> list[tuple[str, ...]]:
+        """
+        Normalizes and validates index specifications declared in cls._index_at.
+
+        Supported input formats:
+        - Single column string: "name" -> [("name",)]
+        - Single column tuple/list: ("name",) -> [("name",)]
+        - Multiple single-column indexes: ("name", "slug") -> [("name",), ("slug",)]
+        - Composite indexes: (("game_status", "rating"), "name") -> [("game_status", "rating"), ("name",)]
+
+        Returns:
+            A list of column tuples representing each index to create.
+
+        Raises:
+            ValueError: If an index element is invalid or references an unmapped column.
+        """
+        raw_indexes = getattr(cls, "_index_at", ())
+        if not raw_indexes:
+            return []
+
+        if isinstance(raw_indexes, str):
+            raw_list = [raw_indexes]
+        elif isinstance(raw_indexes, (list, tuple)):
+            raw_list = list(raw_indexes)
+        else:
+            raise ValueError(
+                f"Invalid _index_at specification in {cls.__name__}: expected str or sequence, got {type(raw_indexes).__name__}"
+            )
+
+        valid_fields = set(cls.model_fields.keys()) | set(cls._get_tech_columns().keys()) | {"id"}
+        normalized: list[tuple[str, ...]] = []
+
+        for item in raw_list:
+            if isinstance(item, str):
+                cols = (item,)
+            elif isinstance(item, (list, tuple)):
+                if not item:
+                    continue
+                cols = tuple(str(c) for c in item)
+            else:
+                raise ValueError(
+                    f"Invalid index element {item!r} in {cls.__name__}._index_at: expected str or sequence of str"
+                )
+
+            for col in cols:
+                if col not in valid_fields:
+                    raise ValueError(
+                        f"Column {col!r} specified in {cls.__name__}._index_at does not exist in schema fields or technical columns."
+                    )
+
+            normalized.append(cols)
+
+        return normalized
+
+    @classmethod
+    def get_index_name(cls, cols: tuple[str, ...]) -> str:
+        """
+        Deterministically builds a valid PostgreSQL index name for the specified columns.
+
+        PostgreSQL limits identifier length to 63 bytes (NAMEDATALEN - 1).
+        If the identifier exceeds 63 characters, it is truncated and appended
+        with a deterministic SHA256 digest to prevent collision and overflow.
+        """
+        table_name = cls.get_table_name()
+        cols_slug = "_".join(cols)
+        full_name = f"idx_{table_name}_{cols_slug}"
+        if len(full_name) <= 63:
+            return full_name
+
+        hash_suffix = sha256(cols_slug.encode("utf-8")).hexdigest()[:8]
+        prefix = full_name[:54]
+        return f"{prefix}_{hash_suffix}"
 
     @classmethod # get columns snapshot
     def get_columns_snapshot(cls, 

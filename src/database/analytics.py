@@ -111,6 +111,65 @@ def ensure_schema(db_pool: ConnectionPool) -> None:
 
         query = cls.build_pg_query()
         execute_sql_from_string(pool=db_pool, query=query)
+        sync_table_indexes(db_pool=db_pool, model=cls)
+
+
+def sync_table_indexes(db_pool: ConnectionPool, model: type[BaseIGDBSchema]) -> None:
+    """
+    Synchronizes indexes for a given model schema in PostgreSQL.
+
+    Dynamically creates newly added indexes and drops obsolete ones that match
+    the model's managed naming prefix (idx_{table_name}_%).
+    Primary keys, unique constraints, and foreign key junction tables are never dropped.
+    """
+    schema = DatabaseSchema.ANALYTICS.value
+    table_name = model.get_table_name()
+    expected_indexes = {
+        model.get_index_name(cols): cols
+        for cols in model.get_indexes()
+    }
+
+    # Query existing managed indexes on the target table
+    query_existing = """
+        SELECT i.relname AS index_name
+        FROM pg_class t
+        JOIN pg_index ix ON t.oid = ix.indrelid
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        LEFT JOIN pg_constraint c ON c.conindid = ix.indexrelid
+        WHERE n.nspname = %s
+          AND t.relname = %s
+          AND c.conindid IS NULL
+          AND ix.indisprimary = FALSE
+          AND i.relname LIKE %s;
+    """
+    managed_prefix = f"idx_{table_name}_%"
+    rows = execute_sql_from_string(
+        pool=db_pool,
+        query=query_existing,
+        params=(schema, table_name, managed_prefix),
+        fetch=True
+    )
+    existing_indexes = {r[0] for r in rows} if rows else set()
+
+    # Drop obsolete indexes removed from _index_at
+    to_drop = existing_indexes - set(expected_indexes.keys())
+    for idx_name in to_drop:
+        _validate_identifier(idx_name, "index")
+        execute_sql_from_string(
+            pool=db_pool,
+            query=f'DROP INDEX IF EXISTS "{schema}"."{idx_name}";'
+        )
+
+    # Create newly added indexes
+    to_create = set(expected_indexes.keys()) - existing_indexes
+    for idx_name in to_create:
+        cols = expected_indexes[idx_name]
+        cols_str = ", ".join(f'"{c}"' for c in cols)
+        execute_sql_from_string(
+            pool=db_pool,
+            query=f'CREATE INDEX IF NOT EXISTS {idx_name} ON "{schema}"."{table_name}" ({cols_str});'
+        )
 
 
 def get_data_from_datalake(
