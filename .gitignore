@@ -10,3 +10,5 @@ notes perso.txt
 tests/private/*
 
 __blobstorage__/
+
+__queuestorage__/
