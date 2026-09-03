@@ -18,7 +18,8 @@ from app.backend.functions import (
     get_recent_batches,
     get_schema_drifts,
     create_fallback_event,
-    get_fallback_events
+    get_fallback_events,
+    get_registered_tables
 )
 
 import logging
@@ -225,5 +226,14 @@ def api_schema_history():
     return jsonify(drifts)
 
 
+@app.route("/api/tables", methods=["GET"])
+@login_required
+def api_tables():
+    return jsonify({"tables": get_registered_tables()})
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    host = os.environ.get("FLASK_HOST", "0.0.0.0")
+    port = int(os.environ.get("FLASK_PORT", 5000))
+    app.run(host=host, port=port, debug=True)
+

@@ -6,22 +6,124 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Azure Market Insights — ELT Governance Dashboard</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        /* Modern Micro-Interactions & Dashboard Enhancements */
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+
+        .toast-msg {
+            background: rgba(12, 35, 64, 0.92);
+            color: #ffffff;
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            box-shadow: 0 8px 32px rgba(0, 45, 90, 0.35);
+            padding: 12px 20px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            pointer-events: auto;
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: opacity 0.3s ease;
+        }
+
+        .toast-success { border-left: 4px solid #2ecc71; }
+        .toast-error   { border-left: 4px solid #e74c3c; }
+        .toast-info    { border-left: 4px solid #00b4db; }
+
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .btn-copy {
+            background: rgba(255, 255, 255, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            border-radius: 6px;
+            padding: 2px 6px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-left: 6px;
+            transition: all 0.2s;
+        }
+        .btn-copy:hover {
+            background: #ffffff;
+            color: #0078d7;
+            transform: scale(1.05);
+        }
+
+        .refresh-toggle-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.5);
+            padding: 4px 12px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.7);
+            font-size: 12px;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #2ecc71;
+            display: inline-block;
+            box-shadow: 0 0 8px #2ecc71;
+            animation: pulse 2s infinite;
+        }
+        .pulse-dot.paused {
+            background: #f39c12;
+            box-shadow: 0 0 8px #f39c12;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        .drift-badge {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 2px 3px 2px 0;
+        }
+        .drift-added { background: rgba(46, 204, 113, 0.2); color: #27ae60; border: 1px solid rgba(46, 204, 113, 0.4); }
+        .drift-removed { background: rgba(231, 76, 60, 0.2); color: #c0392b; border: 1px solid rgba(231, 76, 60, 0.4); }
+        .drift-type { background: rgba(243, 156, 18, 0.2); color: #d35400; border: 1px solid rgba(243, 156, 18, 0.4); }
+    </style>
 </head>
 
 <body>
+
+    <!-- Toast Notifications Container -->
+    <div id="toast-container" class="toast-container"></div>
 
     <!-- FULL SCREEN LOGIN LOCK SCREEN -->
     <div id="full-login-screen" class="full-screen-login">
         <div class="login-card">
             <div class="login-logo">🌐</div>
             <h2>IGDB Governance</h2>
-            <p>Connexion requise pour accéder au Control Plane</p>
+            <p>Connexion requise pour accéder au Control Plane ELT</p>
 
             <form onsubmit="handleLoginSubmit(event)">
                 <div class="form-group">
                     <label for="login-username">Identifiant</label>
-                    <input type="text" id="login-username" class="form-input" placeholder="ex: admin ou visitor"
-                        required>
+                    <input type="text" id="login-username" class="form-input" placeholder="admin ou visitor" required>
                 </div>
                 <div class="form-group">
                     <label for="login-password">Mot de passe</label>
@@ -32,7 +134,9 @@
                     🚀 Se Connecter
                 </button>
             </form>
-
+            <div style="margin-top: 14px; font-size: 11px; color: var(--text-muted);">
+                Comptes de démo : <a href="#" onclick="fillPreset('admin', 'admin123'); return false;" style="color:#0078d7;">Admin</a> | <a href="#" onclick="fillPreset('visitor', 'visitor123'); return false;" style="color:#0078d7;">Viewer</a>
+            </div>
         </div>
     </div>
 
@@ -49,10 +153,15 @@
                     </div>
                 </div>
                 <div class="header-status">
+                    <div class="refresh-toggle-group">
+                        <span id="pulse-indicator" class="pulse-dot"></span>
+                        <span id="refresh-timer-label">Auto: 10s</span>
+                        <button class="btn-aero" id="btn-toggle-refresh" style="padding: 2px 8px; font-size:11px;" onclick="toggleAutoRefresh()">⏸ Pause</button>
+                    </div>
                     <div id="user-profile-area" class="user-badge">
                         <span id="user-info-text">Chargement compte...</span>
                     </div>
-                    <button class="btn-aero btn-primary" onclick="refreshAllData()">🔄 Actualiser</button>
+                    <button class="btn-aero btn-primary" onclick="refreshCurrentTab(true)">🔄 Actualiser</button>
                 </div>
             </header>
 
@@ -67,8 +176,8 @@
                     <div class="kpi-value" id="kpi-success-failed">- / -</div>
                 </div>
                 <div class="kpi-card">
-                    <div class="kpi-title">Overrides Actifs</div>
-                    <div class="kpi-value" id="kpi-active-overrides" style="color: #f39c12;">-</div>
+                    <div class="kpi-title">Fallbacks En Attente</div>
+                    <div class="kpi-value" id="kpi-pending-fallbacks" style="color: #f39c12;">-</div>
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-title">Total Objets Ingérés</div>
@@ -80,8 +189,7 @@
             <main class="main-panel">
                 <div class="tabs-bar">
                     <button class="tab-btn active" onclick="switchTab('tab-runs', this)">🚀 Ingestion Runs</button>
-                    <button class="tab-btn" onclick="switchTab('tab-checkpoints', this)">⚙️ Checkpoints &
-                        Fallback</button>
+                    <button class="tab-btn" onclick="switchTab('tab-checkpoints', this)">⚙️ Checkpoints & Fallback</button>
                     <button class="tab-btn" onclick="switchTab('tab-batches', this)">📜 Logs de Batchs</button>
                     <button class="tab-btn" onclick="switchTab('tab-schema', this)">🔍 Schema Drift Audit</button>
                 </div>
@@ -97,8 +205,7 @@
                             <option value="RUNNING">RUNNING</option>
                             <option value="FAILED">FAILED</option>
                         </select>
-                        <span id="runs-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0
-                            éléments</span>
+                        <span id="runs-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0 éléments</span>
                     </div>
                     <div class="table-responsive">
                         <table class="aero-table">
@@ -124,12 +231,9 @@
 
                 <!-- TAB 2: Checkpoints & Event-Driven Fallback Queue -->
                 <section id="tab-checkpoints" class="tab-content">
-                    <div
-                        style="display:flex; justify-shadow:space-between; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                        <h3 style="font-size:16px; color:var(--text-main);">📋 File d'Attente des Événements Fallback
-                        </h3>
-                        <button class="btn-aero btn-warning" onclick="openFallbackEventModal()">➕ Créer un Événement
-                            Fallback</button>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                        <h3 style="font-size:16px; color:var(--text-main);">📋 File d'Attente des Événements Fallback</h3>
+                        <button class="btn-aero btn-warning" onclick="openFallbackEventModal()">➕ Créer un Événement Fallback</button>
                     </div>
 
                     <div class="table-responsive" style="margin-bottom: 24px;">
@@ -154,33 +258,34 @@
                         </table>
                     </div>
 
-                    <h3 style="font-size:16px; color:var(--text-main); margin-bottom:12px;">📍 Index des Checkpoints
-                        Incrémentaux Continu</h3>
+                    <h3 style="font-size:16px; color:var(--text-main); margin-bottom:12px;">📍 Index des Checkpoints Incrémentaux Continu</h3>
                     <div class="filter-toolbar">
                         <input type="text" id="filter-ckpt-search" class="filter-input"
                             placeholder="🔍 Rechercher Table..." oninput="renderCheckpointsTable()">
-                        <span id="ckpt-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0
-                            tables</span>
+                        <select id="filter-ckpt-status" class="filter-select" onchange="renderCheckpointsTable()">
+                            <option value="ALL">Tous les modes</option>
+                            <option value="INCRÉMENTAL">INCRÉMENTAL</option>
+                            <option value="OVERRIDE">OVERRIDE READY</option>
+                        </select>
+                        <span id="ckpt-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0 tables</span>
                     </div>
                     <div class="table-responsive">
                         <table class="aero-table">
                             <thead>
                                 <tr>
                                     <th class="sortable" onclick="sortData('checkpoints', 'table_name')">Table ⇕</th>
-                                    <th class="sortable" onclick="sortData('checkpoints', 'current_watermark')">
-                                        Watermark Actuel ⇕</th>
-                                    <th class="sortable" onclick="sortData('checkpoints', 'fallback_watermark')">
-                                        Fallback Safety ⇕</th>
+                                    <th class="sortable" onclick="sortData('checkpoints', 'current_watermark')">Watermark Actuel ⇕</th>
+                                    <th class="sortable" onclick="sortData('checkpoints', 'fallback_watermark')">Fallback Safety ⇕</th>
                                     <th class="sortable" onclick="sortData('checkpoints', 'last_id')">Dernier ID ⇕</th>
                                     <th class="sortable" onclick="sortData('checkpoints', 'offset_val')">Offset ⇕</th>
-                                    <th class="sortable" onclick="sortData('checkpoints', 'updated_at')">Dernière Maj ⇕
-                                    </th>
+                                    <th>Mode</th>
+                                    <th class="sortable" onclick="sortData('checkpoints', 'updated_at')">Dernière Maj ⇕</th>
                                     <th>Action Quick Replay</th>
                                 </tr>
                             </thead>
                             <tbody id="checkpoints-tbody">
                                 <tr>
-                                    <td colspan="7" style="text-align:center;">Chargement...</td>
+                                    <td colspan="8" style="text-align:center;">Chargement...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -197,8 +302,7 @@
                             <option value="SUCCESS">SUCCESS</option>
                             <option value="FAILED">FAILED</option>
                         </select>
-                        <span id="batches-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0
-                            batchs</span>
+                        <span id="batches-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0 batchs</span>
                     </div>
                     <div class="table-responsive">
                         <table class="aero-table">
@@ -207,8 +311,7 @@
                                     <th class="sortable" onclick="sortData('batches', 'batch_id')">ID ⇕</th>
                                     <th class="sortable" onclick="sortData('batches', 'table_name')">Table ⇕</th>
                                     <th class="sortable" onclick="sortData('batches', 'status')">Statut ⇕</th>
-                                    <th class="sortable" onclick="sortData('batches', 'cursor_value')">Cursor Value ⇕
-                                    </th>
+                                    <th class="sortable" onclick="sortData('batches', 'cursor_value')">Cursor Value ⇕</th>
                                     <th class="sortable" onclick="sortData('batches', 'offset_value')">Offset ⇕</th>
                                     <th class="sortable" onclick="sortData('batches', 'records_count')">Objets ⇕</th>
                                     <th class="sortable" onclick="sortData('batches', 'duration_ms')">Durée (ms) ⇕</th>
@@ -225,11 +328,12 @@
                     </div>
                 </section>
 
-                <!-- TAB 4: Schema History -->
+                <!-- TAB 4: Schema Drift Audit -->
                 <section id="tab-schema" class="tab-content">
                     <div class="filter-toolbar">
                         <input type="text" id="filter-schema-search" class="filter-input"
-                            placeholder="🔍 Rechercher Table / Colonne..." oninput="renderSchemaTable()">
+                            placeholder="🔍 Rechercher Table / Dérive..." oninput="renderSchemaTable()">
+                        <span id="schema-count-badge" class="badge" style="background:#e2e8f0; color:#475569;">0 entrées</span>
                     </div>
                     <div class="table-responsive">
                         <table class="aero-table">
@@ -237,9 +341,8 @@
                                 <tr>
                                     <th class="sortable" onclick="sortData('schema', 'id')">ID ⇕</th>
                                     <th class="sortable" onclick="sortData('schema', 'table_name')">Table ⇕</th>
-                                    <th class="sortable" onclick="sortData('schema', 'column_name')">Colonne Détectée ⇕
-                                    </th>
-                                    <th>Type de Donnée</th>
+                                    <th>Détail Dérive Colonnes</th>
+                                    <th class="sortable" onclick="sortData('schema', 'schema_hash')">Signature Hash ⇕</th>
                                     <th class="sortable" onclick="sortData('schema', 'detected_at')">Détecté Le ⇕</th>
                                     <th>Run ID</th>
                                     <th>Statut</th>
@@ -260,17 +363,18 @@
     <!-- Modal Trigger Fallback Event -->
     <div class="modal-overlay" id="fallback-modal">
         <div class="modal-card">
-            <h3>Planifier un Événement Fallback</h3>
-            <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">Définissez une plage temporelle
-                (timestamps Unix) à rejouer pour la table sélectionnée.</p>
+            <h3 id="fallback-modal-title">Planifier un Événement Fallback</h3>
+            <p style="font-size:12px; color:var(--text-muted); margin-bottom:16px;">
+                Définissez une plage temporelle (timestamps Unix) à rejouer pour la table sélectionnée. Le pipeline traitera cet intervalle en priorité absolue.
+            </p>
             <div class="form-group">
                 <label for="modal-fallback-table">Table Cible</label>
                 <select id="modal-fallback-table" class="form-input">
                     <option value="GameSchema">GameSchema (IGDB Games)</option>
-                    <option value="FranchiseSchema">FranchiseSchema</option>
-                    <option value="PlatformSchema">PlatformSchema</option>
-                    <option value="GenreSchema">GenreSchema</option>
                     <option value="CompanySchema">CompanySchema</option>
+                    <option value="GenreSchema">GenreSchema</option>
+                    <option value="PlatformSchema">PlatformSchema</option>
+                    <option value="ReleaseDateSchema">ReleaseDateSchema</option>
                 </select>
             </div>
             <div class="form-group">
@@ -292,15 +396,43 @@
     </div>
 
     <script>
-        let rawData = { runs: [], checkpoints: [], batches: [], schema: [] };
+        let rawData = { runs: [], checkpoints: [], batches: [], schema: [], fallbackEvents: [] };
         let sortState = { key: null, asc: true };
         let currentUser = { logged_in: false, username: null, role: null };
+        let currentTab = 'tab-runs';
+        let autoRefreshInterval = null;
+        let isAutoRefreshActive = true;
+        let refreshSecondsLeft = 10;
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast-msg toast-${type}`;
+            const icon = type === 'success' ? '✅' : (type === 'error' ? '❌' : 'ℹ️');
+            toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                setTimeout(() => toast.remove(), 300);
+            }, 3500);
+        }
+
+        function copyText(text, label = 'Élément') {
+            if (!text) return;
+            navigator.clipboard.writeText(text).then(() => {
+                showToast(`${label} copié dans le presse-papier !`, 'success');
+            }).catch(() => {
+                showToast(`Échec copie dans le presse-papier`, 'error');
+            });
+        }
 
         function switchTab(tabId, btn) {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
             btn.classList.add('active');
+            currentTab = tabId;
+            refreshCurrentTab(false);
         }
 
         function formatDate(tsStr) {
@@ -334,15 +466,19 @@
 
                 const data = await res.json();
                 if (res.ok) {
+                    showToast('Connexion réussie', 'success');
                     checkUserSession();
                 } else {
-                    alert('Erreur: ' + data.error);
+                    showToast(data.error || 'Identifiants invalides', 'error');
                 }
-            } catch (e) { alert('Erreur connexion: ' + e); }
+            } catch (e) {
+                showToast('Erreur connexion: ' + e, 'error');
+            }
         }
 
         async function logout() {
             await fetch('/api/logout', { method: 'POST' });
+            showToast('Déconnexion effectuée', 'info');
             checkUserSession();
         }
 
@@ -361,21 +497,37 @@
 
                     const roleClass = currentUser.role === 'ADMIN' ? 'role-admin' : 'role-viewer';
                     profileArea.innerHTML = `
-                    <span>👤 <strong>${currentUser.username}</strong></span>
-                    <span class="user-role-tag ${roleClass}">${currentUser.role}</span>
-                    <button class="btn-aero" style="padding: 2px 8px; font-size:11px; margin-left:6px;" onclick="logout()">Déconnexion</button>
-                `;
+                        <span>👤 <strong>${currentUser.username}</strong></span>
+                        <span class="user-role-tag ${roleClass}">${currentUser.role}</span>
+                        <button class="btn-aero" style="padding: 2px 8px; font-size:11px; margin-left:6px;" onclick="logout()">Déconnexion</button>
+                    `;
+                    loadDynamicTables();
                     loadStats();
-                    loadRuns();
-                    loadFallbackEvents();
-                    loadCheckpoints();
-                    loadBatches();
-                    loadSchemaHistory();
+                    refreshCurrentTab(true);
+                    startAutoRefreshLoop();
                 } else {
                     loginScreen.style.display = 'flex';
                     dashboardWrapper.style.display = 'none';
+                    stopAutoRefreshLoop();
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadDynamicTables() {
+            try {
+                const res = await fetch('/api/tables');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.tables && data.tables.length) {
+                        const select = document.getElementById('modal-fallback-table');
+                        select.innerHTML = data.tables.map(t => `<option value="${t}">${t}</option>`).join('');
+                    }
+                }
+            } catch (e) {
+                console.error("Could not load dynamic tables:", e);
+            }
         }
 
         function sortData(section, key) {
@@ -408,9 +560,75 @@
                 const data = await res.json();
                 document.getElementById('kpi-total-runs').textContent = data.total_runs || 0;
                 document.getElementById('kpi-success-failed').textContent = `${data.successful_runs || 0} / ${data.failed_runs || 0}`;
-                document.getElementById('kpi-active-overrides').textContent = data.active_overrides || 0;
+                document.getElementById('kpi-pending-fallbacks').textContent = data.pending_fallbacks || 0;
                 document.getElementById('kpi-records-count').textContent = (data.total_records_ingested || 0).toLocaleString();
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // Lazy Tab-based Loading: only fetch data for the active view
+        async function refreshCurrentTab(showToastNotice = false) {
+            if (!currentUser.logged_in) return;
+            loadStats();
+
+            if (currentTab === 'tab-runs') {
+                await loadRuns();
+            } else if (currentTab === 'tab-checkpoints') {
+                await Promise.all([loadCheckpoints(), loadFallbackEvents()]);
+            } else if (currentTab === 'tab-batches') {
+                await loadBatches();
+            } else if (currentTab === 'tab-schema') {
+                await loadSchemaHistory();
+            }
+
+            if (showToastNotice) {
+                showToast('Données actualisées', 'info');
+            }
+        }
+
+        function toggleAutoRefresh() {
+            isAutoRefreshActive = !isAutoRefreshActive;
+            const dot = document.getElementById('pulse-indicator');
+            const btn = document.getElementById('btn-toggle-refresh');
+            const label = document.getElementById('refresh-timer-label');
+
+            if (isAutoRefreshActive) {
+                dot.classList.remove('paused');
+                btn.textContent = '⏸ Pause';
+                refreshSecondsLeft = 10;
+                label.textContent = 'Auto: 10s';
+                showToast('Rafraîchissement automatique activé', 'info');
+            } else {
+                dot.classList.add('paused');
+                btn.textContent = '▶ Reprendre';
+                label.textContent = 'Pause';
+                showToast('Rafraîchissement automatique en pause', 'info');
+            }
+        }
+
+        function startAutoRefreshLoop() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            refreshSecondsLeft = 10;
+            autoRefreshInterval = setInterval(() => {
+                if (!isAutoRefreshActive || !currentUser.logged_in) return;
+                refreshSecondsLeft--;
+                if (refreshSecondsLeft <= 0) {
+                    refreshSecondsLeft = 10;
+                    refreshCurrentTab(false);
+                }
+                const label = document.getElementById('refresh-timer-label');
+                if (label && isAutoRefreshActive) {
+                    label.textContent = `Auto: ${refreshSecondsLeft}s`;
+                }
+            }, 1000);
+        }
+
+        function stopAutoRefreshLoop() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
         }
 
         async function loadRuns() {
@@ -439,9 +657,13 @@
             }
             tbody.innerHTML = filtered.map(r => {
                 const badgeClass = r.status === 'COMPLETED' ? 'badge-success' : (r.status === 'RUNNING' ? 'badge-running' : 'badge-failed');
+                const shortId = r.run_id.substring(0, 8);
                 return `
                 <tr>
-                    <td><code>${r.run_id}</code></td>
+                    <td>
+                        <code>${shortId}...</code>
+                        <button class="btn-copy" onclick="copyText('${r.run_id}', 'Run ID')">📋</button>
+                    </td>
                     <td><span class="badge" style="background:#e0f7fa; color:#006064;">${r.layer}</span></td>
                     <td><span class="badge ${badgeClass}">${r.status}</span></td>
                     <td>${formatDate(r.started_at)}</td>
@@ -462,8 +684,8 @@
         }
 
         function renderCheckpointsTable() {
-            const search = document.getElementById('filter-ckpt-search').value.toLowerCase();
-            const status = document.getElementById('filter-ckpt-status').value;
+            const search = (document.getElementById('filter-ckpt-search')?.value || '').toLowerCase();
+            const status = document.getElementById('filter-ckpt-status')?.value || 'ALL';
 
             const filtered = rawData.checkpoints.filter(c => {
                 const matchSearch = c.table_name.toLowerCase().includes(search);
@@ -496,8 +718,8 @@
                 <td>${formatDate(c.updated_at)}</td>
                 <td>
                     ${isAdmin ?
-                    `<button class="btn-aero btn-warning" onclick="openOverrideModal('${c.table_name}')">⚡ Fallback</button>` :
-                    `<span class="badge badge-disabled" title="Seul un Administrateur peut déclencher un fallback">🔒 Admin Requis</span>`}
+                    `<button class="btn-aero btn-warning" style="padding:4px 10px; font-size:12px;" onclick="openFallbackEventModal('${c.table_name}', ${c.current_watermark})">⚡ Fallback</button>` :
+                    `<span class="badge badge-disabled" title="Seul un Administrateur peut déclencher un fallback">🔒 Admin</span>`}
                 </td>
             </tr>
         `).join('');
@@ -527,19 +749,25 @@
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;">Aucun batch correspondant.</td></tr>';
                 return;
             }
-            tbody.innerHTML = filtered.map(b => `
-            <tr>
-                <td>${b.batch_id}</td>
-                <td><strong>${b.table_name}</strong></td>
-                <td><span class="badge ${b.status === 'SUCCESS' ? 'badge-success' : 'badge-failed'}">${b.status}</span></td>
-                <td>${b.cursor_value}</td>
-                <td>${b.offset_value}</td>
-                <td><strong>${b.records_count}</strong></td>
-                <td>${b.duration_ms} ms</td>
-                <td><code style="font-size:11px;">${b.query_sent || '-'}</code></td>
-                <td>${formatDate(b.created_at)}</td>
-            </tr>
-        `).join('');
+            tbody.innerHTML = filtered.map(b => {
+                const escapedQuery = (b.query_sent || '').replace(/'/g, "\\'");
+                return `
+                <tr>
+                    <td>${b.batch_id}</td>
+                    <td><strong>${b.table_name}</strong></td>
+                    <td><span class="badge ${b.status === 'SUCCESS' ? 'badge-success' : 'badge-failed'}">${b.status}</span></td>
+                    <td>${b.cursor_value}</td>
+                    <td>${b.offset_value}</td>
+                    <td><strong>${b.records_count}</strong></td>
+                    <td>${b.duration_ms} ms</td>
+                    <td>
+                        <code style="font-size:11px;">${b.query_sent ? b.query_sent.substring(0, 35) + '...' : '-'}</code>
+                        ${b.query_sent ? `<button class="btn-copy" onclick="copyText('${escapedQuery}', 'Requête Apicalypse')">📋</button>` : ''}
+                    </td>
+                    <td>${formatDate(b.created_at)}</td>
+                </tr>
+            `;
+            }).join('');
         }
 
         async function loadSchemaHistory() {
@@ -553,69 +781,52 @@
         function renderSchemaTable() {
             const search = document.getElementById('filter-schema-search').value.toLowerCase();
             const filtered = rawData.schema.filter(s => {
-                return s.table_name.toLowerCase().includes(search) || s.column_name.toLowerCase().includes(search);
+                return s.table_name.toLowerCase().includes(search) || (s.changes_summary || '').toLowerCase().includes(search);
             });
 
+            document.getElementById('schema-count-badge').textContent = `${filtered.length} entrée(s)`;
             const tbody = document.getElementById('schema-tbody');
             if (!filtered.length) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Aucune dérive de schéma trouvée.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Aucune dérive de schéma enregistrée.</td></tr>';
                 return;
             }
-            tbody.innerHTML = filtered.map(d => `
-            <tr>
-                <td>${d.id}</td>
-                <td><strong>${d.table_name}</strong></td>
-                <td><code>${d.column_name}</code></td>
-                <td>${d.data_type || '-'}</td>
-                <td>${formatDate(d.detected_at)}</td>
-                <td><code>${d.detected_in_run_id || '-'}</code></td>
-                <td><span class="badge badge-running">${d.status}</span></td>
-            </tr>
-        `).join('');
-        }
 
-        function openOverrideModal(tableName) {
-            if (!currentUser.logged_in || currentUser.role !== 'ADMIN') {
-                alert('Accès refusé: Seul un utilisateur connecté en tant qu’ADMIN peut déclencher un fallback.');
-                return;
-            }
-            document.getElementById('modal-table-name').value = tableName;
-            document.getElementById('modal-title').textContent = `Activer Fallback pour : ${tableName}`;
-            document.getElementById('modal-custom-watermark').value = '';
-            document.getElementById('override-modal').classList.add('active');
-        }
-
-        function closeModal() {
-            document.getElementById('override-modal').classList.remove('active');
-        }
-
-        async function submitOverride() {
-            const tableName = document.getElementById('modal-table-name').value;
-            const customWatermark = document.getElementById('modal-custom-watermark').value;
-
-            try {
-                const res = await fetch('/api/checkpoints/override', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        table_name: tableName,
-                        custom_watermark: customWatermark ? parseInt(customWatermark) : null,
-                        activate_fallback: true
-                    })
-                });
-
-                if (res.ok) {
-                    closeModal();
-                    refreshAllData();
-                } else {
-                    const err = await res.json();
-                    alert('Erreur: ' + err.error);
+            tbody.innerHTML = filtered.map(d => {
+                let badgeHtml = '';
+                if (d.added && d.added.length) {
+                    badgeHtml += d.added.map(a => `<span class="drift-badge drift-added">+${a}</span>`).join('');
                 }
-            } catch (e) { alert('Erreur lors de l’envoi de l’override: ' + e); }
-        }
+                if (d.removed && d.removed.length) {
+                    badgeHtml += d.removed.map(r => `<span class="drift-badge drift-removed">-${r}</span>`).join('');
+                }
+                if (d.type_changed && Object.keys(d.type_changed).length) {
+                    badgeHtml += Object.keys(d.type_changed).map(t => `<span class="drift-badge drift-type">~${t}</span>`).join('');
+                }
+                if (!badgeHtml) {
+                    badgeHtml = `<span style="font-size:12px; color:var(--text-muted);">${d.changes_summary || 'Snapshot Initial'}</span>`;
+                }
 
-        function refreshAllData() {
-            checkUserSession();
+                const shortHash = d.schema_hash ? d.schema_hash.substring(0, 10) + '...' : '-';
+                const shortRunId = d.detected_in_run_id ? d.detected_in_run_id.substring(0, 8) + '...' : '-';
+
+                return `
+                <tr>
+                    <td>${d.id}</td>
+                    <td><strong>${d.table_name}</strong></td>
+                    <td>${badgeHtml}</td>
+                    <td>
+                        <code>${shortHash}</code>
+                        ${d.schema_hash ? `<button class="btn-copy" onclick="copyText('${d.schema_hash}', 'Hash')">📋</button>` : ''}
+                    </td>
+                    <td>${formatDate(d.detected_at)}</td>
+                    <td>
+                        <code>${shortRunId}</code>
+                        ${d.detected_in_run_id ? `<button class="btn-copy" onclick="copyText('${d.detected_in_run_id}', 'Run ID')">📋</button>` : ''}
+                    </td>
+                    <td><span class="badge badge-running">${d.status}</span></td>
+                </tr>
+            `;
+            }).join('');
         }
 
         async function loadFallbackEvents() {
@@ -654,14 +865,14 @@
             }).join('');
         }
 
-        function openFallbackEventModal(tableName = 'GameSchema') {
+        function openFallbackEventModal(tableName = 'GameSchema', suggestedStartWatermark = null) {
             if (!currentUser.logged_in || currentUser.role !== 'ADMIN') {
-                alert('Accès refusé: Seul un Administrateur ADMIN peut créer un événement fallback.');
+                showToast('Accès refusé: Seul un Administrateur peut créer un événement fallback.', 'error');
                 return;
             }
             if (tableName) document.getElementById('modal-fallback-table').value = tableName;
-            document.getElementById('modal-start-watermark').value = '';
-            document.getElementById('modal-end-watermark').value = '';
+            document.getElementById('modal-start-watermark').value = suggestedStartWatermark || 1577836800; // 2020-01-01
+            document.getElementById('modal-end-watermark').value = Math.floor(Date.now() / 1000);
             document.getElementById('fallback-modal').classList.add('active');
         }
 
@@ -675,7 +886,7 @@
             const endWatermark = document.getElementById('modal-end-watermark').value;
 
             if (!tableName || !startWatermark || !endWatermark) {
-                alert('Veuillez remplir tous les champs : Table, Start Watermark et End Watermark.');
+                showToast('Veuillez remplir tous les champs du formulaire.', 'error');
                 return;
             }
 
@@ -693,26 +904,19 @@
                 if (res.ok) {
                     closeFallbackModal();
                     loadFallbackEvents();
-                    alert('Événement Fallback planifié avec succès ! Le pipeline le traitera en priorité.');
+                    loadStats();
+                    showToast('Événement Fallback planifié avec succès !', 'success');
                 } else {
                     const err = await res.json();
-                    alert('Erreur: ' + err.error);
+                    showToast('Erreur: ' + (err.error || 'Échec création'), 'error');
                 }
-            } catch (e) { alert('Erreur lors de la création de l’événement: ' + e); }
+            } catch (e) {
+                showToast('Erreur réseau lors de la création de l’événement: ' + e, 'error');
+            }
         }
 
         // Auto-init on page load
         checkUserSession();
-        setInterval(() => {
-            if (currentUser.logged_in) {
-                loadStats();
-                loadRuns();
-                loadFallbackEvents();
-                loadCheckpoints();
-                loadBatches();
-                loadSchemaHistory();
-            }
-        }, 10000);
     </script>
 
 </body>
