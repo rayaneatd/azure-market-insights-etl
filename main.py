@@ -8,33 +8,39 @@ from src.database import execute_sql_from_file
 from src.handle_ingestion import do_ingestion
 from src.database.analytics import ingest_batches_to_postgres
 
-# authentication is managed only when the program starts
-datalake_service_client = init_datalake_service_client()
-database_pool = init_database_engine()
+def run_full_pipeline(datalake_client=None, db_pool=None):                                                                                                                                                                                                   
+    print("[PIPELINE] Starting Azure Market Insights ELT orchestration...", flush=True)
 
-# full code - orchestration is fully linear
-def run_full_pipeline():                                                                                                                                                                                                   
-    if datalake_service_client is None:
+    client = datalake_client or init_datalake_service_client()
+    pool = db_pool or init_database_engine()
+
+    if client is None:
         log_to_discord("Error: Datalake service client not initialized", level=AlertLevel.ERROR)
+        print("[PIPELINE ERROR] Datalake service client not initialized", flush=True)
         return 
 
-    if database_pool is None:
+    if pool is None:
         log_to_discord("Error: Database connection pool not initialized", level=AlertLevel.ERROR)
+        print("[PIPELINE ERROR] Database connection pool not initialized", flush=True)
         return
 
     # Ensure log tables schema is applied before ingestion
     try:
         ddl_path = os.path.join(os.path.dirname(__file__), "src", "database", "models", "log_schemas.sql")
-        execute_sql_from_file(database_pool, ddl_path)
+        execute_sql_from_file(pool, ddl_path)
     except Exception as e:
         log_to_discord(f"Critical error applying database migrations: {e}", level=AlertLevel.ERROR)
+        print(f"[PIPELINE ERROR] Critical error applying migrations: {e}", flush=True)
         return
     
-    
-    # main pipeline
-    #TODO; la fonction qui log les runs sera déplacée ici, peut etre qu'on sépare Raw et Analytics, on met tout en pending puis on update à chaque début des deux pipelines respectives
-    do_ingestion(datalake_service_client, database_pool)
-    ingest_batches_to_postgres(datalake_service_client, database_pool)
+    # Ingestion Layer: API -> RAW Layer (ADLS)
+    print("[PIPELINE] Executing RAW Ingestion layer...", flush=True)
+    do_ingestion(client, pool)
+
+    # Analytics Layer: RAW -> Polars -> PostgreSQL
+    print("[PIPELINE] Executing ANALYTICS Transformation & Loading layer...", flush=True)
+    ingest_batches_to_postgres(client, pool)
+    print("[PIPELINE] ELT Pipeline execution completed.", flush=True)
 
 if __name__ == "__main__":
     run_full_pipeline()
