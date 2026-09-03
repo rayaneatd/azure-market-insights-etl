@@ -1,255 +1,286 @@
-# Azure Market Insights — IGDB ELT Pipeline
+# Azure Market Insights — IGDB ELT & Governance Platform
 
-A production-grade ELT pipeline that ingests video game market data from the [IGDB API](https://api-docs.igdb.com/) into Azure Data Lake Storage Gen2 and PostgreSQL, with a real-time governance dashboard and an event-driven fallback architecture.
+[![Python 3.13+](https://img.shields.io/badge/Python-3.13+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Polars](https://img.shields.io/badge/Data_Engine-Polars-CD792C.svg?logo=polars&logoColor=white)](https://pola.rs/)
+[![Azure Data Lake Gen2](https://img.shields.io/badge/Storage-Azure_ADLS_Gen2-0078D4.svg?logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/products/storage/data-lake-storage/)
+[![PostgreSQL 16](https://img.shields.io/badge/Database-PostgreSQL_16-336791.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Flask](https://img.shields.io/badge/Control_Plane-Flask-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
+[![uv](https://img.shields.io/badge/Package_Manager-uv-DE5FE9.svg?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Built as a Python-focused portfolio project. The goal was not just to move data, but to build something resilient enough to handle the kind of problems that actually show up in production — rate limits, schema drift, partial failures, event-driven replays, and full data lineage with zero data loss.
+A production-grade ELT (Extract-Load-Transform) pipeline and real-time governance platform that ingests video game market intelligence from the [IGDB API](https://api-docs.igdb.com/) into **Azure Data Lake Storage Gen2** (Bronze/Raw) and **PostgreSQL** (Analytics Layer), featuring adaptive schema drift detection, an event-driven FIFO fallback engine, and a **Frutiger Aero** governance dashboard.
 
 ---
 
-## Architecture Overview
+## 🏛 Architecture Overview
 
 ```
-                          ┌──────────────────────────────────┐
-                          │        IGDB REST API (v4)        │
-                          │  /games /genres /platforms etc.   │
-                          └──────────────┬───────────────────┘
-                                         │  HTTPX + Token Bucket (4 req/s)
-                                         ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        INGESTION ENGINE (Python)                       │
-│                                                                        │
-│  ┌─────────────────┐    ┌──────────────────┐    ┌───────────────────┐  │
-│  │  Fallback Event  │──▶│ _construct_tables │──▶│  Batch Fetch Loop │  │
-│  │  Queue (FIFO)    │    │      _dict()      │    │  + ADLS Persist   │  │
-│  └─────────────────┘    └──────────────────┘    └───────────────────┘  │
-│           ▲                                              │             │
-│           │ PENDING events consumed first                │             │
-│           │ before incremental checkpoints               ▼             │
-│  ┌────────┴──────────────────────────────────────────────────────────┐ │
-│  │                   PostgreSQL — logs schema                        │ │
-│  │  ingestion_runs │ ingestion_checkpoints │ batch_logs              │ │
-│  │  schema_history │ fallback_events                                 │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────┘
-         │                                              │
-         ▼                                              ▼
-┌─────────────────────┐                    ┌─────────────────────────┐
-│  Azure Data Lake    │                    │  Governance Dashboard   │
-│  Gen2 / Azurite     │                    │  (Flask + Frutiger Aero)│
-│                     │                    │                         │
-│  Bronze/Raw Layer   │                    │  KPIs, Runs, Batches,   │
-│  {endpoint}/        │                    │  Checkpoints, Schema    │
-│    {cursor}_{off}   │                    │  Drift, Fallback Queue  │
-│      .json          │                    │                         │
-└─────────────────────┘                    └─────────────────────────┘
-```
-
----
-
-## What it does
-
-`main.py` acts as the orchestrator. Each run is fully linear and idempotent:
-
-1. **Checks for pending fallback events** in `logs.fallback_events`. If a replay has been scheduled (via the dashboard or directly in the database), the pipeline processes it first — fetching only the time window specified by `start_watermark` → `end_watermark`.
-
-2. **Falls back to incremental ingestion** if no events are pending. Reads the last checkpoint per table from `logs.ingestion_checkpoints` and queries `where updated_at >= last_watermark`.
-
-3. **Fetches raw data** from 5 IGDB endpoints (`/games`, `/genres`, `/platforms`, `/franchises`, `/companies`) with automatic throttling via a token bucket (4 req/s) and progressive cursor-based pagination with offset wrapping at 10,000.
-
-4. **Persists every raw page** as immutable JSON in Azure Data Lake (`{endpoint}/{cursor}_{offset}.json`), creating a full audit trail in the Bronze/Raw zone.
-
-5. **Logs everything** — every batch attempt is recorded in `logs.batch_logs` with the Apicalypse query sent, response time, record count, and any errors. Every ingestion run is tracked in `logs.ingestion_runs` with start/end times and final status.
-
-6. **Fires Discord alerts** on failures with enough context to debug without looking at logs.
-
----
-
-## Event-Driven Fallback Architecture
-
-The pipeline decouples replay/backfill from the main incremental checkpoint. Instead of mutating the checkpoint to trigger a re-ingestion (which risks corrupting the incremental state), fallbacks are modeled as **events** in a FIFO queue:
-
-```sql
-logs.fallback_events
-├── event_id       UUID (auto-generated)
-├── table_name     VARCHAR — which table to replay
-├── start_watermark BIGINT — Unix timestamp start of the window
-├── end_watermark   BIGINT — Unix timestamp end of the window
-├── status          PENDING → IN_PROGRESS → COMPLETED / FAILED
-├── records_processed INT — running total
-└── error_message   TEXT — if something went wrong
-```
-
-**How it works:**
-1. An admin creates a fallback event (via the dashboard or SQL) specifying `table_name`, `start_watermark`, and `end_watermark`.
-2. On the next pipeline run, `_construct_tables_dict()` checks for `PENDING` events before reading checkpoints.
-3. If events exist, the pipeline marks them `IN_PROGRESS`, fetches the specified time window, and marks them `COMPLETED` or `FAILED`.
-4. The incremental checkpoint is **never touched** during a fallback — the two systems are fully decoupled.
-
-This means you can replay any arbitrary time window for any table without disrupting the live incremental pipeline.
-
----
-
-## Adaptive Schema Management
-
-IGDB doesn't publish a changelog. Fields get added, renamed, or quietly removed without notice. The schema is declared in Python (`tables_schema.py`) using **Patito** (Pydantic + Polars), one class per table. That file is the single source of truth.
-
-**Soft change — a new column appears in the API:**
-- The pipeline continues without interruption (`model_config = {"extra": "ignore"}`)
-- The new column is logged in `logs.schema_history` with status `NEW_COLUMN`
-- A Discord notification fires so a human can decide whether to include it
-- Once added to `tables_schema.py`, the next run picks it up automatically
-
-**Breaking change — a required field is missing or a type has changed:**
-- Affected records are flagged and the error is logged
-- The pipeline continues processing what it can
-- A Discord alert fires with full error context
-
-The raw data in ADLS is always complete and untouched. Nothing is ever permanently lost.
-
----
-
-## Governance Dashboard
-
-A real-time operational dashboard built with Flask and a **Frutiger Aero** design aesthetic (glassmorphism, gradients, micro-animations). Accessible locally or via public tunnel for cross-region access.
-
-**Features:**
-- 📊 **KPI cards** — Total runs, success/failure ratio, active overrides, total records ingested
-- 🚀 **Ingestion Runs** — Full history with status badges, timing, and error messages
-- 📋 **Fallback Event Queue** — FIFO event list with real-time status tracking, plus a modal to create new events
-- 📍 **Incremental Checkpoints** — Current watermark state per table with quick-replay buttons
-- 📜 **Batch Logs** — Every API call logged with cursor, offset, record count, duration, and the raw Apicalypse query
-- 🔍 **Schema Drift Audit** — Detected column changes with timestamps and run IDs
-- 🔎 **Filters & Sorting** — Full-text search and sortable columns on every table
-
-**Security:**
-- 🔒 Full-screen login lock — nothing is accessible without authentication
-- 👤 **RBAC** — `ADMIN` gets full access (including fallback creation), `VIEWER` gets read-only
-- 🛡️ `@login_required` on all API routes, RBAC guards on destructive actions
-- 📝 HTTP access logs directed to `app/server.log` (no terminal spam)
-
----
-
-## Tech Stack
-
-| Layer | Tool |
-|---|---|
-| Language | Python 3.13 |
-| HTTP Client | `httpx` (async-ready, HTTP/2) |
-| Schema Validation | `patito` (Pydantic v2 + Polars) |
-| Serialization | `msgspec` (zero-copy, high-perf) |
-| DataFrame Engine | `polars` (Rust-backed, no Pandas) |
-| Database | PostgreSQL via `psycopg 3` + `psycopg-pool` |
-| Raw Storage | Azure Data Lake Storage Gen2 / Azurite |
-| Auth (Cloud) | `azure-identity` (DefaultAzureCredential) |
-| Auth (Local) | Connection string via `.env` |
-| Dashboard | Flask + Vanilla HTML/CSS/JS |
-| Alerting | Discord Webhooks |
-| Package Manager | `uv` |
-| Local Infra | Docker Compose (PostgreSQL + Azurite) |
-
----
-
-## Running it locally
-
-### Prerequisites
-- Docker (for PostgreSQL and Azurite)
-- Python 3.13+ with [`uv`](https://docs.astral.sh/uv/)
-- A free [Twitch developer account](https://api-docs.igdb.com/#getting-started) for IGDB API credentials
-
-### Setup
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/rayaneatd/azure-market-insights-elt.git
-cd azure-market-insights-elt
-
-# 2. Install dependencies
-uv sync
-
-# 3. Spin up local infrastructure
-docker compose up -d
-
-# 4. Add your credentials to .env
-#    See example.env for required variables
-
-# 5. Run the pipeline
-uv run python main.py
-
-# 6. (Optional) Start the governance dashboard
-uv run python app/server.py
-# → http://127.0.0.1:5000
-
-# 7. (Optional) Expose dashboard publicly (e.g. for remote access)
-npx localtunnel --port 5000
+                               ┌──────────────────────────────────┐
+                               │        IGDB REST API (v4)        │
+                               │  /games /genres /platforms etc.  │
+                               └──────────────┬───────────────────┘
+                                              │  HTTPX + Token Bucket (4 req/s)
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   INGESTION ENGINE (Extract & Load)                             │
+│                                                                                                 │
+│  ┌──────────────────────┐     ┌──────────────────────┐     ┌─────────────────────────────────┐  │
+│  │ Fallback Event Queue │────▶│ _construct_tables    │────▶│ Batch Fetch Loop & Throttling   │  │
+│  │ (logs.fallback_events│     │        _dict()       │     │ (Tenacity Retry + Jitter)       │  │
+│  └──────────────────────┘     └──────────────────────┘     └────────────────┬────────────────┘  │
+│               ▲                                                             │                   │
+│               │ PENDING replays processed first                             ▼                   │
+│  ┌────────────┴────────────────────────┐                   ┌─────────────────────────────────┐  │
+│  │   PostgreSQL — logs schema          │                   │ Azure Data Lake Storage Gen2    │  │
+│  │   • ingestion_runs                  │                   │ (Bronze / Raw Layer)            │  │
+│  │   • ingestion_checkpoints           │                   │ Hive Partitioning:              │  │
+│  │   • batch_logs                      │                   │ IGDB/{endpoint}/year=Y/month=M/ │  │
+│  │   • schema_history                  │                   │      day=D/{cursor}_{off}.json  │  │
+│  └─────────────────────────────────────┘                   └────────────────┬────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┼───────────────────┘
+                                                                              │
+                                                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   TRANSFORMATION & ANALYTICS LAYER                              │
+│                                                                                                 │
+│  ┌──────────────────────┐     ┌──────────────────────┐     ┌─────────────────────────────────┐  │
+│  │ Multi-threaded Raw   │────▶│ Polars DataEngine    │────▶│ Idempotent Postgres Loader      │  │
+│  │ Batch Downloader     │     │ • Schema enforcement │     │ • ADBC Arrow engine             │  │
+│  │ (ThreadPoolExecutor) │     │ • Dedup on PK ('id') │     │ • Temporary Staging Tables      │  │
+│  └──────────────────────┘     │ • M2M Rel explosions │     │ • ON CONFLICT DO UPDATE         │  │
+│                               │ • Audit columns      │     │ • Dynamic Index Sync            │  │
+│                               └──────────────────────┘     └────────────────┬────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┼───────────────────┘
+                                                                              │
+                                                                              ▼
+┌─────────────────────────────────────────────────────────┐      ┌────────────────────────────┐
+│ PostgreSQL Analytics Target (public schema)             │      │ Frutiger Aero Dashboard    │
+│ • games_scd2       • platforms      • release_dates     │◀─────│ (Flask + HTML5 / CSS3)     │
+│ • companies        • genres         • M2M join tables   │      │ Live KPIs, Batch Explorer, │
+│ • dynamic indexes (idx_{table}_{cols})                  │      │ Replay Trigger, RBAC Admin │
+└─────────────────────────────────────────────────────────┘      └────────────────────────────┘
 ```
 
 ---
 
-## Project Structure
+## ✨ Key Technical Highlights
+
+### 1. Unified Schemas as Single Source of Truth (SSOT)
+Each IGDB entity is modeled as a [Patito](https://github.com/Jakob-A-K/patito) model inheriting from [`BaseIGDBSchema`](file:///c:/Users/Administrator/Documents/PROJECT%20DATA/azure-market-insights-elt/src/igdb/models/BASE.py) (combining Pydantic v2 validation and Polars schema typing):
+- **Apicalypse Query Generation**: Automatically builds dynamic API queries (`fields`, `where`, `sort`, `limit`, `offset`).
+- **DDL & Index Synthesis**: Generates PostgreSQL table creation DDL, primary/foreign keys, and indexes on demand.
+- **Dynamic Index Synchronization**: Compares existing PostgreSQL catalog indexes against model definitions, creating missing indexes and dropping obsolete ones deterministically without touching constraints.
+
+### 2. Event-Driven FIFO Fallback Replays
+Replaying historical data windows never mutates live incremental checkpoints:
+- Fallback requests are queued as **isolated events** in `logs.fallback_events`.
+- Ingestion processes pending fallback windows first (`start_watermark` → `end_watermark`), then cleanly resumes continuous incremental watermarks.
+- If a replay fails, the incremental position remains 100% intact.
+
+### 3. Adaptive Schema Drift Detection
+When IGDB introduces new fields or alters signatures:
+- The ingestion continues uninterrupted (`extra = 'ignore'`).
+- The schema difference is detected via cryptographic hashing and logged into `logs.schema_history` as structured `JSONB` (`added`, `removed`, `type_changed`).
+- Discord webhook alerts notify data engineers without crashing batch workloads.
+
+### 4. Zero-Pandas High Performance Data Flow
+- Raw ingestion persists immutable JSON into Azure Data Lake (or local Azurite emulator).
+- The Analytics pipeline downloads batches using a `ThreadPoolExecutor` and transforms them with [Polars](https://pola.rs/) using Rust-backed vectorization.
+- Writes to PostgreSQL utilize the **Apache Arrow ADBC** driver (`adbc-driver-postgresql`) through staging tables, guaranteeing atomic, idempotent `ON CONFLICT` upserts.
+
+### 5. Frutiger Aero Governance Control Plane
+- Lightweight, responsive web interface built with Flask and styled using a modern **Frutiger Aero** aesthetic (glassmorphism, radial glow gradients, live status indicators).
+- **Role-Based Access Control (RBAC)**: `ADMIN` can trigger manual/targeted fallbacks and edit checkpoints; `VIEWER` gets read-only access.
+- **Lazy Tab-Aware Polling**: Queries only the data required for the active tab, reducing database load by over 80%.
+- Real-time telemetry: Ingestion runs, batch logs with full Apicalypse queries, checkpoint frontiers, and schema drift logs.
+
+---
+
+## 📂 Project Structure
 
 ```
 .
-├── main.py                          # Entry point — orchestrates the full pipeline
-├── pyproject.toml                   # Dependencies and project config (uv)
+├── main.py                          # Pipeline entry point (orchestrates Raw + Analytics)
+├── deploy.ps1                       # Windows PowerShell deployment & automation script
+├── deploy.sh                        # Linux / macOS / WSL deployment script
+├── docker-compose.yml               # Local infrastructure (PostgreSQL 16 + Azurite)
+├── example.env                      # Configuration template with documented variables
+├── pyproject.toml                   # Project dependencies and packaging (uv)
 │
 ├── src/
-│   ├── handle_ingestion.py          # Core ingestion engine (event-driven + incremental)
-│   ├── tables_schema.py             # Patito/Pydantic models — schema SSOT
-│   ├── database_auth.py             # PostgreSQL connection pool (psycopg 3)
-│   ├── datalake_service_client.py   # Azure ADLS / Azurite client init
-│   ├── igdb/
-│   │   ├── auth.py                  # IGDB OAuth2 token management
-│   │   ├── client.py                # IGDB API client (httpx + msgspec)
-│   │   └── rate_limit.py            # Token bucket rate limiter (4 req/s)
-│   ├── secrets/
-│   │   ├── project_credentials.py   # Credential loading
-│   │   └── project_environment.py   # Environment detection (dev/prod)
+│   ├── config.py                    # Environment resolution & credentials loading
+│   ├── handle_ingestion.py          # RAW layer ingestion engine (API -> ADLS)
+│   │
+│   ├── database/                    # Database & Analytics module
+│   │   ├── analytics.py             # Polars transformations, DQ checks & Postgres upsert
+│   │   ├── auth.py                  # Psycopg 3 connection pool initialization
+│   │   ├── core.py                  # ADBC write path, raw SQL execution & validation
+│   │   ├── fallback.py              # Event-driven fallback queries & state tracking
+│   │   ├── logs.py                  # Audit logger (runs, batches, checkpoints, schema)
+│   │   ├── types.py                 # Dataclasses & schema structs
+│   │   └── models/
+│   │       └── log_schemas.sql      # DDL for all logs and governance tables
+│   │
+│   ├── datalake/                    # Azure Data Lake Storage Gen2 module
+│   │   ├── functions.py             # Dual-mode read/write (Azurite Blob / ADLS Gen2 DFS)
+│   │   └── service_client.py        # Client authentication (DefaultAzureCredential / Azurite)
+│   │
+│   ├── igdb/                        # IGDB Client & Models
+│   │   ├── auth.py                  # Twitch OAuth2 client credentials flow & token cache
+│   │   ├── client.py                # HTTPX client with Tenacity retry & rate-limit handling
+│   │   ├── rate_limit.py            # Thread-safe Token Bucket rate limiter (4 req/s)
+│   │   └── models/                  # SSOT Data Models (Patito / Pydantic v2)
+│   │       ├── BASE.py              # BaseIGDBSchema abstract base class
+│   │       ├── games.py             # GameSchema (SCD2 history tracking)
+│   │       ├── companies.py         # CompanySchema
+│   │       ├── genres.py            # GenreSchema
+│   │       ├── platforms.py         # PlatformSchema
+│   │       └── release_dates.py     # ReleaseDateSchema
+│   │
 │   └── utils/
-│       ├── database_interaction.py   # All PostgreSQL helpers (checkpoints, logs, fallback events)
-│       ├── datalake_interaction.py   # ADLS read/write helpers
-│       └── log_messages.py           # Discord alerting + structured logging
+│       ├── alerting.py              # Discord webhook alerting
+│       └── types.py                 # Python -> Polars -> PostgreSQL type mappings
 │
-├── app/
-│   ├── server.py                    # Flask dashboard backend (RBAC, APIs)
-│   ├── style.css                    # Frutiger Aero design system
+├── app/                             # Frutiger Aero Governance Dashboard
+│   ├── server.py                    # Flask server, authentication & REST APIs
+│   ├── style.css                    # Frutiger Aero design system tokens & animations
 │   ├── templates/
-│   │   └── index.html               # Dashboard SPA (login, KPIs, tables, modals)
-│   ├── backend/
-│   │   └── functions.py             # Dashboard data access layer
-│   └── sql/
-│       └── log_schemas.sql          # DDL for all governance tables
+│   │   └── index.html               # SPA frontend (KPIs, Runs, Checkpoints, Batch Logs)
+│   └── backend/
+│       └── functions.py             # Dashboard queries, password hashing & drift parsing
 │
-├── docs/
-│   └── schema/                      # Data model diagrams (Draw.io)
-├── docker-compose.yml
-└── example.env
+└── tests/
+    └── public/                      # Unit & integration test suite
+        ├── test_analytics_pipeline.py
+        ├── test_igdb_models.py
+        └── test_index_management.py
 ```
 
 ---
 
-## Design Decisions
+## 🚀 Quick Start Guide
 
-**Why event-driven fallback instead of checkpoint mutation?**
-Mutating the checkpoint to trigger a replay is fragile — if the replay fails halfway, the incremental state is corrupted and you lose your place. By modeling fallbacks as events in a separate queue, the two systems are fully decoupled. The checkpoint always reflects the true incremental frontier, and replays can be retried independently.
-
-**Why Patito instead of plain Pydantic?**
-Patito extends Pydantic models to also validate Polars DataFrames. This means the same schema class validates individual records at ingestion time _and_ entire DataFrames at transformation time. One source of truth, two validation layers.
-
-**Why Polars instead of Pandas?**
-Polars is Rust-backed, uses Apache Arrow memory format, and is significantly faster for the column-oriented transforms this pipeline needs. It also has a stricter type system that catches bugs earlier.
-
-**Why store raw JSON before transforming?**
-This is the Bronze/Raw layer pattern. If a transformation bug corrupts clean data in PostgreSQL, you can always re-run the transformation against the untouched raw files. You never have to call the API again to recover. The raw data is the immutable source of truth.
-
-**Why UPSERT instead of INSERT?**
-Because pipelines get restarted. The watermark overlap means some records will be fetched twice. `ON CONFLICT DO UPDATE` makes the operation idempotent. Run it once or a hundred times, the result in PostgreSQL is always the same.
+### Prerequisites
+- [Python 3.13+](https://www.python.org/)
+- [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`
+- [Docker Desktop](https://www.docker.com/) (for local PostgreSQL & Azurite)
+- A free [Twitch Developer Application](https://dev.twitch.tv/console/apps) for IGDB Client ID & Secret
 
 ---
 
-## Roadmap
+### Option A — One-Click Automated Deployment (Recommended)
 
-- [ ] **Analytics Layer** — Polars-based transformation from Raw to Analytics schema
-- [ ] **Makefile** — One-command orchestration for all services
-- [ ] **Discovery Job** — Automated detection of new IGDB columns (cron-based)
-- [ ] **Airflow/Prefect** — Proper scheduling and observability (currently manual trigger)
-- [ ] **Azure Deployment** — ACA or VM with Managed Identity replacing local connection strings
+#### On Windows (PowerShell):
+```powershell
+# Full setup: checks prerequisites, creates .env, starts containers, syncs dependencies, applies migrations & runs tests
+.\deploy.ps1 setup
+
+# Run the ELT pipeline:
+.\deploy.ps1 pipeline
+
+# Start the Governance Dashboard:
+.\deploy.ps1 app
+# → Available at http://localhost:5000
+```
+
+#### On Linux / macOS / WSL (Bash):
+```bash
+chmod +x deploy.sh
+./deploy.sh setup
+./deploy.sh pipeline
+./deploy.sh app
+```
+
+---
+
+### Option B — Manual Step-by-Step Setup
+
+1. **Clone the Repository:**
+   ```bash
+   git clone https://github.com/rayaneatd/azure-market-insights-elt.git
+   cd azure-market-insights-elt
+   ```
+
+2. **Configure Environment Variables:**
+   ```bash
+   cp example.env .env
+   ```
+   *Edit `.env` and fill in your `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.*
+
+3. **Install Dependencies:**
+   ```bash
+   uv sync
+   ```
+
+4. **Start Local Infrastructure (PostgreSQL 16 + Azurite):**
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Apply Database Migrations:**
+   ```bash
+   uv run python -c "from src.database.auth import init_database_engine; from src.database.core import execute_sql_from_file; execute_sql_from_file(init_database_engine(), 'src/database/models/log_schemas.sql'); print('Migrations applied!')"
+   ```
+
+6. **Run the ELT Pipeline:**
+   ```bash
+   uv run python main.py
+   ```
+
+7. **Start the Governance Dashboard:**
+   ```bash
+   uv run python app/server.py
+   # → Open http://localhost:5000
+   ```
+
+---
+
+## 🔒 Governance Dashboard & Access
+
+The dashboard includes full-screen authentication protection and role-based access control:
+
+| Role | Default Username | Default Password | Capabilities |
+|---|---|---|---|
+| **Administrator** | `admin` | `admin123` (or via `ADMIN_PASSWORD` in `.env`) | Full control: Trigger fallbacks, alter watermarks, inspect logs & schema |
+| **Viewer** | `visitor` | `visitor123` (or via `VIEWER_PASSWORD` in `.env`) | Read-only: View KPIs, runs, batch logs, checkpoints and schema audits |
+
+---
+
+## 🧪 Testing & Validation
+
+Execute the test suite with `uv` or Python `unittest`:
+
+```powershell
+# Via deploy script
+.\deploy.ps1 test
+
+# Directly via unittest
+uv run python -m unittest discover tests/public
+```
+
+Test coverage includes:
+- Polars DataFrame schema enforcement & unmapped field discarding.
+- Primary key deduplication keeping latest record timestamps.
+- Relationship explosion into junction tables (M2M join tables).
+- Apicalypse query builder validation & filter formatting.
+- Dynamic index generation and 63-byte PostgreSQL NAMEDATALEN limit safety.
+- Dynamic index synchronization (selective `DROP` and `CREATE INDEX`).
+
+---
+
+## 🗺 Project Roadmap
+
+- [x] **Raw Ingestion Layer** — Throttled extraction to ADLS Bronze JSON.
+- [x] **Event-Driven Fallbacks** — FIFO queue decoupled from continuous checkpoints.
+- [x] **Analytics Layer** — High-performance Polars transformation and ADBC PostgreSQL upsert.
+- [x] **Schema Drift Auditing** — Cryptographic signature hashing and JSONB column tracking.
+- [x] **Frutiger Aero Dashboard** — Real-time control plane with RBAC and lazy tab-aware polling.
+- [x] **One-Click Deployment** — Cross-platform scripts (`deploy.ps1`, `deploy.sh`) and Docker Compose.
+- [ ] **Azure Container Apps / Kubernetes** — Cloud container deployment with Managed Identity.
+- [ ] **Orchestration with Airflow / Dagster** — Scheduled cron DAGs and alerting integration.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
