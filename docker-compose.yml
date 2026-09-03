@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: igdb-elt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DEV_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${DEV_POSTGRES_DB:-igdb_elt}
+    ports:
+      - "${DEV_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DEV_POSTGRES_USER:-postgres} -d ${DEV_POSTGRES_DB:-igdb_elt}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: igdb-elt-azurite
+    restart: unless-stopped
+    command: "azurite --blobHost 0.0.0.0 --blobPort 10000 --queueHost 0.0.0.0 --queuePort 10001 --location /data --debug /data/debug.log"
+    ports:
+      - "10000:10000" # Blob Service
+      - "10001:10001" # Queue Service
+    volumes:
+      - azurite_data:/data
+
+volumes:
+  postgres_data:
+    name: igdb_elt_postgres_data
+  azurite_data:
+    name: igdb_elt_azurite_data
