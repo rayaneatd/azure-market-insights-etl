@@ -130,8 +130,8 @@ def log_schema_change(
     _execute(pool, query, {
         "table_name": table_name,
         "schema_hash": schema_hash,
-        "columns_snapshot": msgspec.json.encode(columns_snapshot), # besoin d'encoder ça en JSON ?
-        "changed_columns": msgspec.json.encode(changed_columns),
+        "columns_snapshot": msgspec.json.encode(columns_snapshot).decode("utf-8"),
+        "changed_columns": msgspec.json.encode(changed_columns).decode("utf-8"),
         "run_id": run_id,
         "status": status,
         "action_taken": action_taken
