@@ -4,7 +4,8 @@
 # ==================================================================
 set -e
 
-ACTION="${1:-setup}"
+ACTION="${1:-all}"
+INTERVAL_MINUTES="${2:-15}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -139,14 +140,52 @@ run_pipeline() {
     "$PYTHON_CMD" main.py
 }
 
+open_browser() {
+    local url="${1:-http://localhost:5000}"
+    write_step "Opening browser at $url..."
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$url" &>/dev/null &
+    elif command -v open &>/dev/null; then
+        open "$url" &>/dev/null &
+    elif command -v wslview &>/dev/null; then
+        wslview "$url" &>/dev/null &
+    else
+        echo -e "${YELLOW}Could not open browser automatically. Please open: $url${NC}"
+    fi
+}
+
 run_app() {
     write_step "Starting Governance Dashboard (app/server.py)..."
     echo -e "${GREEN}  Dashboard available at: http://localhost:5000${NC}"
+    open_browser "http://localhost:5000"
     PYTHON_CMD=$(get_python_cmd)
     "$PYTHON_CMD" app/server.py
 }
 
+run_schedule() {
+    local interval="${1:-15}"
+    write_step "Continuous Scheduler: running pipeline automatically every $interval minute(s)..."
+    echo "Press Ctrl+C to stop."
+    run_pipeline
+    while true; do
+        echo -e "\n${CYAN}⏳ Next execution in $interval minute(s)...${NC}"
+        sleep "$((interval * 60))"
+        run_pipeline
+    done
+}
+
 case "$ACTION" in
+    all)
+        test_prerequisites
+        setup_env_file
+        start_containers
+        sync_dependencies
+        apply_migrations
+        run_tests
+        run_pipeline
+        echo -e "\n${GREEN}🎉 [READY] Pipeline completed! Launching dashboard...${NC}"
+        run_app
+        ;;
     setup)
         test_prerequisites
         setup_env_file
@@ -155,8 +194,10 @@ case "$ACTION" in
         apply_migrations
         run_tests
         echo -e "\n${GREEN}🎉 [DONE] Environment ready!${NC}"
-        echo "  • Run pipeline : ./deploy.sh pipeline"
-        echo "  • Run dashboard: ./deploy.sh app"
+        echo "  • Run all-in-one : ./deploy.sh all"
+        echo "  • Run pipeline   : ./deploy.sh pipeline"
+        echo "  • Run scheduler  : ./deploy.sh schedule 15"
+        echo "  • Run dashboard  : ./deploy.sh app"
         ;;
     check)
         test_prerequisites
@@ -177,10 +218,25 @@ case "$ACTION" in
     pipeline)
         run_pipeline
         ;;
+    schedule)
+        run_schedule "$INTERVAL_MINUTES"
+        ;;
     app)
         run_app
         ;;
     help|*)
-        echo "Usage: ./deploy.sh [setup|check|up|down|test|pipeline|app|help]"
+        echo "Usage: ./deploy.sh [all|setup|check|up|down|test|pipeline|schedule|app|help] [interval_minutes]"
+        echo ""
+        echo "Actions:"
+        echo "  all       : (Default) Full setup, test, run pipeline, open browser and launch dashboard"
+        echo "  setup     : Prepare containers, dependencies, migrations and tests"
+        echo "  pipeline  : Run single ELT batch (main.py)"
+        echo "  schedule  : Run ELT pipeline in continuous loop (default: every 15 min)"
+        echo "  app       : Open browser and start Flask governance dashboard"
+        echo "  test      : Run unit tests suite"
+        echo "  check     : Verify system prerequisites and environment"
+        echo "  up        : Start Docker containers (PostgreSQL + Azurite)"
+        echo "  down      : Stop Docker containers"
+        echo "  help      : Display this message"
         ;;
 esac

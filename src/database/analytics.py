@@ -211,7 +211,7 @@ def get_data_from_datalake(
             f"Missing raw blob(s) for {Model.__name__}: {len(missing)} file(s)"
         )
  
-    frames = [pl.read_json(io.BytesIO(b)) for b in raw_blobs if b is not None]
+    frames = [pl.read_json(io.BytesIO(b), infer_schema_length=None) for b in raw_blobs if b is not None]
     return pl.concat(frames, how='diagonal_relaxed') if frames else pl.DataFrame()
 
 

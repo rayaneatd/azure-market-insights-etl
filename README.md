@@ -123,32 +123,116 @@ When IGDB introduces new fields or alters signatures:
 
 ---
 
-### Option A — One-Click Automated Deployment (Recommended)
+### ⚙️ Initial Configuration (One-time)
+
+Before launching, configure your environment variables:
+```bash
+cp example.env .env
+```
+Open `.env` and fill in your Twitch credentials:
+```env
+TWITCH_CLIENT_ID=your_client_id_here
+TWITCH_CLIENT_SECRET=your_client_secret_here
+```
+*(All other settings in `.env` are preconfigured with local Docker defaults for PostgreSQL and Azurite).*
+
+---
+
+### 🌟 Deployment Modes
+
+Choose the deployment workflow that fits your needs:
+
+| Mode | Command (Windows) | Command (Linux / macOS) | Best For |
+|---|---|---|---|
+| **Mode 1: All-in-One** *(Recommended)* | `.\deploy.ps1 all` (or `.\deploy.ps1`) | `./deploy.sh all` (or `./deploy.sh`) | First run & quick start: sets up everything, runs the pipeline, and auto-opens the web dashboard. |
+| **Mode 2: Modular / Step-by-Step** | `.\deploy.ps1 [action]` | `./deploy.sh [action]` | Development & debugging: run setup, pipeline batches, tests, or dashboard independently. |
+| **Mode 3: Continuous Ingestion** | `.\deploy.ps1 schedule -IntervalMinutes 15` | `./deploy.sh schedule 15` | Automated operations: runs the pipeline in a continuous loop every N minutes. |
+| **Mode 4: Manual (No Scripts)** | Standard CLI commands | Standard CLI commands | Production containers or environments without PowerShell/Bash scripts. |
+
+---
+
+### Mode 1 — All-in-One Automated Deployment (Recommended)
+
+This single command handles the entire end-to-end lifecycle without requiring any manual intervention:
 
 #### On Windows (PowerShell):
 ```powershell
-# Full setup: checks prerequisites, creates .env, starts containers, syncs dependencies, applies migrations & runs tests
-.\deploy.ps1 setup
-
-# Run the ELT pipeline:
-.\deploy.ps1 pipeline
-
-# Start the Governance Dashboard:
-.\deploy.ps1 app
-# → Available at http://localhost:5000
+.\deploy.ps1
+# Or explicitly:
+.\deploy.ps1 all
 ```
 
 #### On Linux / macOS / WSL (Bash):
 ```bash
 chmod +x deploy.sh
-./deploy.sh setup
-./deploy.sh pipeline
-./deploy.sh app
+./deploy.sh
+# Or explicitly:
+./deploy.sh all
 ```
+
+#### 🔍 What happens automatically under the hood:
+1. **Prerequisites Check**: Verifies that Python 3.13+, `uv`, and Docker are installed and available in PATH.
+2. **Environment File**: Ensures `.env` is present (creates it from `example.env` if missing).
+3. **Local Infrastructure**: Starts Docker Compose services (`igdb-elt-postgres` on port `5432` and `igdb-elt-azurite` on ports `10000`/`10001`).
+4. **Dependencies**: Synchronizes all Python packages in seconds via `uv sync`.
+5. **Database Migrations**: Automatically applies `src/database/models/log_schemas.sql` to initialize all governance and audit tables.
+6. **Unit Tests**: Runs the test suite (`tests/public`) to validate schema constraints, models, and index synchronization.
+7. **ELT Pipeline Execution**: Runs `main.py`, which checks checkpoints, queries IGDB with token bucket rate-limiting (4 req/s), saves raw JSON into Azurite Bronze, vectorizes and transforms the data with Polars, and performs atomic upserts into PostgreSQL.
+8. **Browser Auto-Launch**: Automatically opens your default web browser to `http://localhost:5000`.
+9. **Dashboard Launch**: Starts the Flask Frutiger Aero governance server at `http://localhost:5000`.
 
 ---
 
-### Option B — Manual Step-by-Step Setup
+### Mode 2 — Modular / Step-by-Step Deployment
+
+If you want granular control over individual services during development:
+
+```powershell
+# 1. Setup environment only (containers, dependencies, migrations, tests):
+.\deploy.ps1 setup
+
+# 2. Run a single ELT batch (API -> Azurite -> Polars -> PostgreSQL):
+.\deploy.ps1 pipeline
+
+# 3. Start only the Governance Dashboard (auto-opens browser):
+.\deploy.ps1 app
+
+# 4. Run the unit test suite:
+.\deploy.ps1 test
+
+# 5. Start or stop local infrastructure containers:
+.\deploy.ps1 up      # Start Postgres & Azurite
+.\deploy.ps1 down    # Stop containers
+
+# 6. Check environment integrity:
+.\deploy.ps1 check
+```
+
+*(On Linux / macOS, replace `.\deploy.ps1 <action>` with `./deploy.sh <action>`)*
+
+---
+
+### Mode 3 — Continuous Scheduled Ingestion (Hands-Free)
+
+To keep your analytics database synchronized with IGDB in real time without manually triggering batches, run the pipeline in continuous scheduled mode:
+
+```powershell
+# Runs every 15 minutes (default):
+.\deploy.ps1 schedule
+
+# Or specify a custom interval (e.g., every 30 minutes):
+.\deploy.ps1 schedule -IntervalMinutes 30
+```
+
+*(On Linux / macOS: `./deploy.sh schedule 30`)*
+
+The scheduler runs an immediate batch, waits for the configured interval, and continuously queries subsequent delta windows using updated watermark timestamps.
+
+---
+
+### Mode 4 — Manual Step-by-Step (Without Scripts)
+
+For CI/CD pipelines, production servers, or developers preferring direct CLI commands:
 
 1. **Clone the Repository:**
    ```bash
@@ -156,11 +240,11 @@ chmod +x deploy.sh
    cd azure-market-insights-elt
    ```
 
-2. **Configure Environment Variables:**
+2. **Configure Environment:**
    ```bash
    cp example.env .env
+   # Edit .env with your TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET
    ```
-   *Edit `.env` and fill in your `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.*
 
 3. **Install Dependencies:**
    ```bash
@@ -185,7 +269,7 @@ chmod +x deploy.sh
 7. **Start the Governance Dashboard:**
    ```bash
    uv run python app/server.py
-   # → Open http://localhost:5000
+   # → Open http://localhost:5000 in your browser
    ```
 
 ---

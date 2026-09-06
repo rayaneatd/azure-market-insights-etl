@@ -3,18 +3,35 @@
     Script de déploiement et d'orchestration pour Azure Market Insights ELT.
 
 .DESCRIPTION
-    Ce script automatise la configuration de l'environnement, le lancement
-    de l'infrastructure locale (PostgreSQL + Azurite), l'installation des
-    dépendances, l'application des schémas DDL et l'exécution des tests.
+    Ce script automatise la configuration complète de l'environnement :
+    lancement des conteneurs locaux (PostgreSQL + Azurite), installation des
+    dépendances, application des migrations SQL, exécution des tests,
+    lancement automatique du pipeline ELT et ouverture du dashboard web.
 
 .PARAMETER Action
-    L'action à exécuter: 'setup' (par défaut), 'check', 'up', 'down', 'pipeline', 'app', 'test'.
+    L'action à exécuter:
+      - 'all'      : (Par défaut) Setup complet + Tests + Run Pipeline + Ouverture Browser + Serveur App
+      - 'setup'    : Vérifie les prérequis, configure l'infra Docker, dépendances et migrations
+      - 'pipeline' : Exécute une passe du pipeline ELT (main.py)
+      - 'schedule' : Fait tourner le pipeline en continu toutes les N minutes
+      - 'app'      : Ouvre le navigateur et démarre le dashboard Flask (app/server.py)
+      - 'test'     : Exécute la suite de tests unitaires
+      - 'check'    : Vérifie les prérequis et l'intégrité de l'environnement
+      - 'up'       : Démarre uniquement les conteneurs Docker (Postgres + Azurite)
+      - 'down'     : Arrête les conteneurs Docker
+      - 'help'     : Affiche l'aide
+
+.PARAMETER IntervalMinutes
+    Intervalle en minutes pour le mode 'schedule' (défaut: 15 minutes).
 #>
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("setup", "check", "up", "down", "pipeline", "app", "test", "help")]
-    [string]$Action = "setup"
+    [ValidateSet("all", "setup", "check", "up", "down", "pipeline", "schedule", "app", "test", "help")]
+    [string]$Action = "all",
+
+    [Parameter(Position=1)]
+    [int]$IntervalMinutes = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -173,15 +190,53 @@ function Run-Pipeline {
     & $pythonExec main.py
 }
 
+function Open-Browser {
+    param([string]$Url = "http://localhost:5000")
+    Write-Host "`n🌐 Ouverture automatique de l'interface dans votre navigateur ($Url)..." -ForegroundColor Cyan
+    try {
+        Start-Process $Url
+    } catch {
+        Write-Warn "Impossible d'ouvrir automatiquement le navigateur. Veuillez visiter manuellement : $Url"
+    }
+}
+
 function Run-App {
     Write-Step "Démarrage du Dashboard de Gouvernance (app/server.py)..."
     Write-Host "  Accès web local : http://localhost:5000" -ForegroundColor Green
+    Open-Browser "http://localhost:5000"
     $pythonExec = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "python" }
     & $pythonExec app/server.py
 }
 
+function Run-Schedule {
+    param([int]$Interval = 15)
+    Write-Step "Mode Planificateur Continu : Pipeline exécuté automatiquement toutes les $Interval minute(s)..."
+    Write-Host "  Appuyez sur Ctrl+C pour arrêter le planificateur.`n" -ForegroundColor Gray
+    
+    # Premier run immédiat
+    Run-Pipeline
+
+    while ($true) {
+        $nextRun = (Get-Date).AddMinutes($Interval).ToString("HH:mm:ss")
+        Write-Host "`n⏳ Prochaine exécution automatique prévue à $nextRun (dans $Interval min)..." -ForegroundColor Cyan
+        Start-Sleep -Seconds ($Interval * 60)
+        Run-Pipeline
+    }
+}
+
 # --- Router d'actions ---
 switch ($Action) {
+    "all" {
+        Test-Prerequisites
+        Setup-EnvironmentFile
+        Start-Containers
+        Sync-Dependencies
+        Apply-DatabaseMigrations
+        Run-Tests
+        Run-Pipeline
+        Write-Host "`n🎉 [PRET] Pipeline exécuté avec succès ! Démarrage du dashboard..." -ForegroundColor Green
+        Run-App
+    }
     "setup" {
         Test-Prerequisites
         Setup-EnvironmentFile
@@ -190,8 +245,10 @@ switch ($Action) {
         Apply-DatabaseMigrations
         Run-Tests
         Write-Host "`n🎉 [TERMINE] L'environnement est prêt !" -ForegroundColor Green
-        Write-Host "  • Lancer le pipeline : .\deploy.ps1 pipeline" -ForegroundColor Gray
-        Write-Host "  • Lancer le dashboard: .\deploy.ps1 app" -ForegroundColor Gray
+        Write-Host "  • Tout lancer d'un coup   : .\deploy.ps1 all" -ForegroundColor Gray
+        Write-Host "  • Lancer le pipeline      : .\deploy.ps1 pipeline" -ForegroundColor Gray
+        Write-Host "  • Pipeline en continu     : .\deploy.ps1 schedule -IntervalMinutes 15" -ForegroundColor Gray
+        Write-Host "  • Lancer le dashboard     : .\deploy.ps1 app" -ForegroundColor Gray
     }
     "check" {
         Test-Prerequisites
@@ -212,10 +269,24 @@ switch ($Action) {
     "pipeline" {
         Run-Pipeline
     }
+    "schedule" {
+        Run-Schedule -Interval $IntervalMinutes
+    }
     "app" {
         Run-App
     }
     "help" {
-        Write-Host "Usage: .\deploy.ps1 [setup|check|up|down|test|pipeline|app|help]"
+        Write-Host "Usage: .\deploy.ps1 [Action] [-IntervalMinutes <N>]" -ForegroundColor Yellow
+        Write-Host "`nActions disponibles :"
+        Write-Host "  all       : (Par défaut) Initialise tout, teste, lance le pipeline et ouvre l'app web" -ForegroundColor Cyan
+        Write-Host "  setup     : Initialise les conteneurs, dépendances, migrations et tests"
+        Write-Host "  pipeline  : Exécute une passe du pipeline ELT (main.py)"
+        Write-Host "  schedule  : Lance le pipeline en continu à intervalles réguliers (ex: -IntervalMinutes 15)"
+        Write-Host "  app       : Ouvre le navigateur et démarre le serveur web Flask"
+        Write-Host "  test      : Exécute la suite de tests unitaires"
+        Write-Host "  check     : Vérifie les prérequis et l'intégrité"
+        Write-Host "  up        : Démarre les conteneurs PostgreSQL et Azurite"
+        Write-Host "  down      : Arrête les conteneurs Docker"
+        Write-Host "  help      : Affiche cette aide"
     }
 }

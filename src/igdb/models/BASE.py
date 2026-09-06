@@ -188,7 +188,7 @@ class BaseIGDBSchema(pt.Model):
     @classmethod # get dict of columns
     def _get_columns_snapshot_dict(cls, is_clean):
         return {
-            name: cls._convert_to_polar_types(info.annotation) if is_clean else info.annotation
+            name: cls._convert_to_polar_types(info.annotation) if is_clean else str(info.annotation)
             for name, info in cls.model_fields.items()
         }
 
