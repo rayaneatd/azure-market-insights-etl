@@ -215,6 +215,18 @@ def get_data_from_datalake(
     return pl.concat(frames, how='diagonal_relaxed') if frames else pl.DataFrame()
 
 
+def _stringify_for_hash(df: pl.DataFrame, column: str) -> pl.Expr:
+    dtype = df.schema[column]
+    if isinstance(dtype, pl.List):
+        return (
+            pl.col(column)
+            .list.eval(pl.element().cast(pl.Utf8))
+            .list.sort()
+            .list.join(",")
+            .fill_null("")
+        )
+    return pl.col(column).cast(pl.Utf8).fill_null("")
+
 def enforce_schema_and_types(Model: type, df: pl.DataFrame) -> pl.DataFrame:
     """
     Leverages schema predictability to align the DataFrame with Model fields:
@@ -238,7 +250,7 @@ def enforce_schema_and_types(Model: type, df: pl.DataFrame) -> pl.DataFrame:
 
     # Compute row hashes for data lineage/change tracking
     hash_expr = pl.concat_str(
-        [pl.col(c).cast(pl.Utf8).fill_null("") for c in expected_fields],
+        [_stringify_for_hash(aligned_df, c) for c in expected_fields],
         separator="|"
     ).map_elements(lambda s: sha256(s.encode("utf-8")).hexdigest(), return_dtype=pl.Utf8)
 
