@@ -1,6 +1,6 @@
 # 1. native
 import io
-import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -8,6 +8,7 @@ from typing import Literal
 
 # 2. third party
 import polars as pl
+import patito as pt
 from azure.storage.blob import BlobServiceClient
 from azure.storage.filedatalake import DataLakeServiceClient
 from psycopg_pool import ConnectionPool 
@@ -28,7 +29,9 @@ from .types import AnalyticsTask
 from src.database.logs import (
     get_checkpoints, 
     upsert_checkpoint, 
-    get_unconsumed_raw_batches
+    get_unconsumed_raw_batches,
+    start_ingestion_run,
+    complete_ingestion_run
 )
 from src.database.fallback import (
     get_pending_fallback_events, 
@@ -247,11 +250,9 @@ def enforce_schema_and_types(Model: type, df: pl.DataFrame) -> pl.DataFrame:
             exprs.append(pl.lit(None).alias(name))
 
     aligned_df = df.select(exprs)
-    null_cols = [name for name, dtype in aligned_df.schema.items() if dtype == pl.Null]
     
-    if null_cols: # we cast the shitty columns to avoid crashses..
-        aligned_df = aligned_df.with_columns([pl.col(c).cast(pl.Utf8) for c in null_cols])
-    
+    aligned_df = pt.DataFrame(aligned_df).set_model(Model).cast()
+
     # Compute row hashes for data lineage/change tracking
     hash_expr = pl.concat_str(
         [_stringify_for_hash(aligned_df, c) for c in expected_fields],
@@ -396,6 +397,12 @@ def ingest_batches_to_postgres(
     executes DQ checks, performs idempotent loading into Postgres ANALYTICS schema,
     and updates checkpoints.
     """
+    run_id = str(uuid.uuid4())
+    start_ingestion_run(pool=db_pool, run_id=run_id, layer="ANALYTICS")
+    
+    run_status: Literal["COMPLETED", "FAILED"] = "COMPLETED"
+    run_error = None
+
     ensure_schema(db_pool=db_pool)
 
     data_to_ingest: dict[type, AnalyticsTask] = _get_watermark_dict(db_pool)
@@ -459,11 +466,16 @@ def ingest_batches_to_postgres(
 
         except Exception as load_err:
             err_msg = f"Load failed for {Model.__name__}: {load_err}"
+            
+            run_error = str(load_err)
+            run_status = "FAILED"
+
             log_to_discord(err_msg, AlertLevel.ERROR)
             if task.is_fallback and task.event_id:
                 update_fallback_event_status(db_pool, task.event_id, status="FAILED", error_message=err_msg)
             continue
-
+        finally:
+            complete_ingestion_run(db_pool, run_id, run_status, run_error)
         # Checkpoints and Fallbacks
         if task.is_fallback and task.event_id:
             update_fallback_event_status(
