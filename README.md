@@ -14,52 +14,7 @@ A production-grade ELT (Extract-Load-Transform) pipeline and real-time governanc
 
 ## 🏛 Architecture Overview
 
-```
-                               ┌──────────────────────────────────┐
-                               │        IGDB REST API (v4)        │
-                               │  /games /genres /platforms etc.  │
-                               └──────────────┬───────────────────┘
-                                              │  HTTPX + Token Bucket (4 req/s)
-                                              ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   INGESTION ENGINE (Extract & Load)                             │
-│                                                                                                 │
-│  ┌──────────────────────┐     ┌──────────────────────┐     ┌─────────────────────────────────┐  │
-│  │ Fallback Event Queue │────▶│ _construct_tables    │────▶│ Batch Fetch Loop & Throttling   │  │
-│  │ (logs.fallback_events│     │        _dict()       │     │ (Tenacity Retry + Jitter)       │  │
-│  └──────────────────────┘     └──────────────────────┘     └────────────────┬────────────────┘  │
-│               ▲                                                             │                   │
-│               │ PENDING replays processed first                             ▼                   │
-│  ┌────────────┴────────────────────────┐                   ┌─────────────────────────────────┐  │
-│  │   PostgreSQL — logs schema          │                   │ Azure Data Lake Storage Gen2    │  │
-│  │   • ingestion_runs                  │                   │ (Bronze / Raw Layer)            │  │
-│  │   • ingestion_checkpoints           │                   │ Hive Partitioning:              │  │
-│  │   • batch_logs                      │                   │ IGDB/{endpoint}/year=Y/month=M/ │  │
-│  │   • schema_history                  │                   │      day=D/{cursor}_{off}.json  │  │
-│  └─────────────────────────────────────┘                   └────────────────┬────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┼───────────────────┘
-                                                                              │
-                                                                              ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   TRANSFORMATION & ANALYTICS LAYER                              │
-│                                                                                                 │
-│  ┌──────────────────────┐     ┌──────────────────────┐     ┌─────────────────────────────────┐  │
-│  │ Multi-threaded Raw   │────▶│ Polars DataEngine    │────▶│ Idempotent Postgres Loader      │  │
-│  │ Batch Downloader     │     │ • Schema enforcement │     │ • ADBC Arrow engine             │  │
-│  │ (ThreadPoolExecutor) │     │ • Dedup on PK ('id') │     │ • Temporary Staging Tables      │  │
-│  └──────────────────────┘     │ • M2M Rel explosions │     │ • ON CONFLICT DO UPDATE         │  │
-│                               │ • Audit columns      │     │ • Dynamic Index Sync            │  │
-│                               └──────────────────────┘     └────────────────┬────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┼───────────────────┘
-                                                                              │
-                                                                              ▼
-┌─────────────────────────────────────────────────────────┐      ┌────────────────────────────┐
-│ PostgreSQL Analytics Target (public schema)             │      │ Frutiger Aero Dashboard    │
-│ • games_scd2       • platforms      • release_dates     │◀─────│ (Flask + HTML5 / CSS3)     │
-│ • companies        • genres         • M2M join tables   │      │ Live KPIs, Batch Explorer, │
-│ • dynamic indexes (idx_{table}_{cols})                  │      │ Replay Trigger, RBAC Admin │
-└─────────────────────────────────────────────────────────┘      └────────────────────────────┘
-```
+![Architecture Overview](docs/architecture.png)
 
 ---
 
