@@ -247,7 +247,11 @@ def enforce_schema_and_types(Model: type, df: pl.DataFrame) -> pl.DataFrame:
             exprs.append(pl.lit(None).alias(name))
 
     aligned_df = df.select(exprs)
-
+    null_cols = [name for name, dtype in aligned_df.schema.items() if dtype == pl.Null]
+    
+    if null_cols: # we cast the shitty columns to avoid crashses..
+        aligned_df = aligned_df.with_columns([pl.col(c).cast(pl.Utf8) for c in null_cols])
+    
     # Compute row hashes for data lineage/change tracking
     hash_expr = pl.concat_str(
         [_stringify_for_hash(aligned_df, c) for c in expected_fields],
